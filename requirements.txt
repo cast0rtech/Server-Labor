@@ -1,0 +1,5 @@
+iperf3
+influxdb-client
+python-dotenv
+fastapi
+uvicorn
