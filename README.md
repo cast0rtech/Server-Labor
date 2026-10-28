@@ -68,41 +68,17 @@ INFLUX_TOKEN=lab_token_secure
 
 `IPERF_SERVER_IP` es la dirección del servidor iperf3. `INFLUX_URL` es la dirección de InfluxDB accesible desde el cliente; si el cliente corre en el mismo equipo que Docker, puede ser `http://localhost:8086`. No uses `localhost` si InfluxDB está en otro equipo.
 
-Instala y ejecuta el cliente:
+Al ejecutar `cliente.py` (o `SondaCliente.exe`), se abre la **Interfaz Gráfica (GUI)** interactiva donde puedes introducir directamente la **IP del servidor**, el puerto, el identificador del switch y la duración de la prueba, además de visualizar en tiempo real el ancho de banda (Mbps) y las retransmisiones TCP.
+
+Si deseas ejecutarlo de forma desatendida por línea de comandos:
 
 ```powershell
-python -m pip install -r requirements.txt
-python cliente.py
+python cliente.py --cli --server 192.168.1.10 --duration 30
 ```
-
-El cliente escribe la medición `iperf_tcp` con los campos `bandwidth_mbps` y `tcp_retransmits`, y los tags `hostname` y `switch_id`.
-
-## Compilar y crear el instalador de Windows
-
-`build.ps1` crea el entorno `.venv`, instala las dependencias, genera `SondaCliente.exe` y `ServidorLab.exe` en modo consola y `--onefile`, y compila `instalador.iss`. El resultado esperado es:
-
-```text
-Empaquetado\RedLabTester-Setup.exe
-```
-
-Requisitos previos:
-
-- Python disponible en `PATH`.
-- Inno Setup 6 instalado; `ISCC.exe` debe estar en `PATH` o en una de las rutas estándar de Inno Setup 6.
-- Un `iperf3.exe` para Windows disponible en `PATH` o en `tools\iperf3.exe`. Si solo está en `PATH`, el script lo copia a `tools` para el instalador.
-
-Desde PowerShell, en la carpeta del proyecto:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\build.ps1
-```
-
-El instalador ofrece los componentes **Instalación Completa**, **Solo Servidor** y **Solo Cliente**. Al seleccionar el servidor, agrega reglas de entrada de Windows Firewall para TCP y UDP 5201. El componente cliente instala `.env.example`; crea junto a `SondaCliente.exe` un archivo `.env` con la configuración específica de esa máquina.
 
 ## Compatibilidad de iperf3 en Windows
 
-El módulo Python `iperf3` utiliza la biblioteca nativa `libiperf`. El proyecto oficial de iperf3 no ofrece soporte oficial para Windows, por lo que compilar `cliente.py` con PyInstaller no garantiza que funcione en Windows sin una versión compatible de esa biblioteca nativa. El instalador incluye `iperf3.exe` como herramienta independiente, pero el `cliente.py` actual utiliza el módulo Python y no invoca ese ejecutable. Valida la disponibilidad de `libiperf` en los equipos destino antes de distribuir el cliente.
+El cliente utiliza directamente el binario nativo Windows `iperf3.exe` (junto con `cygwin1.dll`), resolviendo la salida en formato JSON estructurado. Esto garantiza compatibilidad nativa total y alto rendimiento en Windows sin requerir bibliotecas compartidas de Linux.
 
 ## Archivos principales
 

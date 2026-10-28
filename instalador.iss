@@ -31,6 +31,7 @@ Name: "client"; Description: "Cliente (pruebas desde el switch)"; Types: full cl
 Source: "Empaquetado\ServidorLab.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: server
 Source: "Empaquetado\SondaCliente.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: client
 Source: "tools\iperf3.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: server or client
+Source: "tools\cygwin1.dll"; DestDir: "{app}"; Flags: ignoreversion; Components: server or client
 Source: ".env.example"; DestDir: "{app}"; DestName: ".env.example"; Flags: ignoreversion; Components: client
 
 [Icons]

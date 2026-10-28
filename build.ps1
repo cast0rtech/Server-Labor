@@ -64,15 +64,23 @@ try {
     }
 
     Invoke-CheckedCommand -Description 'Instalando dependencias de compilación y ejecución' -Command {
-        & $PythonExe -m pip install pyinstaller iperf3 influxdb-client python-dotenv fastapi uvicorn
+        & $PythonExe -m pip install pyinstaller influxdb-client python-dotenv fastapi uvicorn
     }
 
-    Invoke-CheckedCommand -Description 'Compilando cliente.py como SondaCliente.exe' -Command {
-        & $PythonExe -m PyInstaller --noconfirm --clean --onefile --console --name SondaCliente cliente.py
+    $PyInstallerAddBinary = @()
+    if (Test-Path "tools\iperf3.exe") {
+        $PyInstallerAddBinary += '--add-binary', 'tools/iperf3.exe;.'
+    }
+    if (Test-Path "tools\cygwin1.dll") {
+        $PyInstallerAddBinary += '--add-binary', 'tools/cygwin1.dll;.'
+    }
+
+    Invoke-CheckedCommand -Description 'Compilando cliente.py como SondaCliente.exe con GUI' -Command {
+        & $PythonExe -m PyInstaller --noconfirm --clean --onefile --noconsole --name SondaCliente @PyInstallerAddBinary cliente.py
     }
 
     Invoke-CheckedCommand -Description 'Compilando servidor.py como ServidorLab.exe' -Command {
-        & $PythonExe -m PyInstaller --noconfirm --clean --onefile --console --name ServidorLab servidor.py
+        & $PythonExe -m PyInstaller --noconfirm --clean --onefile --console --name ServidorLab @PyInstallerAddBinary servidor.py
     }
 
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
@@ -85,12 +93,22 @@ try {
         Move-Item -LiteralPath $BuiltExecutable -Destination $Destination -Force
     }
 
+    # Asegurar iperf3 y cygwin1 en la carpeta Empaquetado para ejecucion portable
+    if (Test-Path "tools\iperf3.exe") {
+        Copy-Item -LiteralPath "tools\iperf3.exe" -Destination (Join-Path $OutputDir "iperf3.exe") -Force
+    }
+    if (Test-Path "tools\cygwin1.dll") {
+        Copy-Item -LiteralPath "tools\cygwin1.dll" -Destination (Join-Path $OutputDir "cygwin1.dll") -Force
+    }
+
     $CompilerCandidates = @()
-    foreach ($InstallRoot in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+    foreach ($InstallRoot in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, (Join-Path $env:LocalAppData 'Programs'))) {
         if ($InstallRoot) {
-            $Candidate = Join-Path $InstallRoot 'Inno Setup 6\ISCC.exe'
-            if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
-                $CompilerCandidates += $Candidate
+            foreach ($InnoDir in @('Inno Setup 6', 'Inno Setup 7', 'Inno Setup 5')) {
+                $Candidate = Join-Path $InstallRoot "$InnoDir\ISCC.exe"
+                if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+                    $CompilerCandidates += $Candidate
+                }
             }
         }
     }

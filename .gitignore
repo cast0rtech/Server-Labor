@@ -17,3 +17,5 @@ dist/
 
 # Packaging output binaries
 Empaquetado/*.exe
+Empaquetado/*.dll
+tools/

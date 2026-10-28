@@ -156,32 +156,71 @@ echo [OK] Inno Setup detectado en:
 echo      "%ISCC%"
 echo.
 
-:: 2. Instalar requerimientos
-echo [1/5] Instalando dependencias de Python...
-pip install pyinstaller iperf3 influxdb-client python-dotenv
+:: 2. Detectar Python y verificar pip
+set "PYTHON_CMD="
+where python >nul 2>&1
+if not errorlevel 1 set "PYTHON_CMD=python"
+if not defined PYTHON_CMD (
+    where py >nul 2>&1
+    if not errorlevel 1 set "PYTHON_CMD=py"
+)
+if not defined PYTHON_CMD (
+    echo [ERROR] No se encontro Python en el PATH del sistema.
+    echo Asegurate de tener Python instalado y marcar la casilla "Add python.exe to PATH".
+    pause
+    exit /b 1
+)
+
+echo [OK] Python detectado: %PYTHON_CMD%
 echo.
 
-:: 3. Limpieza previa
+:: 3. Instalar requerimientos
+echo [1/5] Instalando dependencias con %PYTHON_CMD% -m pip...
+%PYTHON_CMD% -m pip install --upgrade pip
+%PYTHON_CMD% -m pip install pyinstaller influxdb-client python-dotenv fastapi uvicorn
+if errorlevel 1 (
+    echo [ERROR] Fallo la instalacion de paquetes de Python.
+    pause
+    exit /b 1
+)
+echo.
+
+:: 4. Limpieza previa
 echo [2/5] Limpiando carpetas de compilaciones anteriores...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 if exist *.spec del /q *.spec
 echo.
 
-:: 4. Compilar con PyInstaller
-echo [3/5] Compilando cliente.py y servidor.py a .exe...
-pyinstaller --onefile --name SondaCliente cliente.py
-pyinstaller --onefile --name ServidorLab servidor.py
+:: 5. Compilar con PyInstaller invocando el modulo de Python directamente
+echo [3/5] Compilando cliente.py (con GUI) y servidor.py a .exe...
+set "ADD_BIN="
+if exist "tools\iperf3.exe" set "ADD_BIN=--add-binary tools/iperf3.exe;."
+if exist "tools\cygwin1.dll" set "ADD_BIN=%ADD_BIN% --add-binary tools/cygwin1.dll;."
+
+%PYTHON_CMD% -m PyInstaller --noconfirm --clean --onefile --noconsole --name SondaCliente %ADD_BIN% cliente.py
+if errorlevel 1 (
+    echo [ERROR] PyInstaller fallo al compilar el Cliente.
+    pause
+    exit /b 1
+)
+
+%PYTHON_CMD% -m PyInstaller --noconfirm --clean --onefile --console --name ServidorLab %ADD_BIN% servidor.py
+if errorlevel 1 (
+    echo [ERROR] PyInstaller fallo al compilar el Servidor.
+    pause
+    exit /b 1
+)
 echo.
 
-:: 5. Mover a la carpeta Empaquetado
+:: 6. Mover a la carpeta Empaquetado
 echo [4/5] Moviendo archivos ejecutables...
 if not exist Empaquetado mkdir Empaquetado
 
 if exist dist\SondaCliente.exe (
     move /Y dist\SondaCliente.exe Empaquetado\SondaCliente.exe >nul
 ) else (
-    echo [ERROR] Fallo la compilacion del Cliente.
+    echo [ERROR] No se encontro el binario compilado del Cliente.
     pause
     exit /b 1
 )
@@ -189,22 +228,16 @@ if exist dist\SondaCliente.exe (
 if exist dist\ServidorLab.exe (
     move /Y dist\ServidorLab.exe Empaquetado\ServidorLab.exe >nul
 ) else (
-    echo [ERROR] Fallo la compilacion del Servidor.
+    echo [ERROR] No se encontro el binario compilado del Servidor.
     pause
     exit /b 1
 )
 echo Ejecutables listos en carpeta Empaquetado.
 echo.
 
-:: RECORDATORIO Y SINCRONIZACION IPERF3
-if exist "Empaquetado\iperf3.exe" (
-    if not exist tools mkdir tools
-    copy /Y "Empaquetado\iperf3.exe" "tools\iperf3.exe" >nul
-)
-if exist "tools\iperf3.exe" (
-    if not exist Empaquetado mkdir Empaquetado
-    copy /Y "tools\iperf3.exe" "Empaquetado\iperf3.exe" >nul
-)
+:: RECORDATORIO Y SINCRONIZACION IPERF3 Y CYGWIN1
+if exist "tools\iperf3.exe" copy /Y "tools\iperf3.exe" "Empaquetado\iperf3.exe" >nul
+if exist "tools\cygwin1.dll" copy /Y "tools\cygwin1.dll" "Empaquetado\cygwin1.dll" >nul
 
 if not exist "tools\iperf3.exe" if not exist "Empaquetado\iperf3.exe" (
     color 0E
