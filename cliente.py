@@ -23,6 +23,8 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
+from version_check import APP_VERSION, check_for_update
+
 # InfluxDB es opcional para que la sonda funcione incluso si la librería no está lista
 try:
     from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -658,6 +660,15 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
         log(f"Motor iperf3 detectado: {found_iperf}")
     else:
         log("ADVERTENCIA: No se encontró iperf3.exe en el sistema.")
+
+    log(f"SondaCliente v{APP_VERSION}")
+
+    def _check_update():
+        upd = check_for_update()
+        if upd:
+            log(f"NUEVA VERSIÓN {upd['version']} disponible: {upd['url']}")
+
+    threading.Thread(target=_check_update, daemon=True).start()
 
     # Lógica de ejecución de la prueba en hilo secundario
     def run_worker():

@@ -193,6 +193,15 @@ try {
         throw "ISCC terminó, pero no generó el instalador esperado: $InstallerPath"
     }
 
+    foreach ($UpdateScript in @('update_servidor.iss', 'update_sonda.iss')) {
+        $UpdatePath = Join-Path $ProjectRoot $UpdateScript
+        if (Test-Path -LiteralPath $UpdatePath -PathType Leaf) {
+            Invoke-CheckedCommand -Description "Compilando $UpdateScript" -Command {
+                & $ISCC $UpdatePath
+            }
+        }
+    }
+
     # Limpiar solamente temporales generados por PyInstaller en la raíz del proyecto.
     foreach ($TemporaryDirectory in @('build', 'dist')) {
         $TemporaryPath = Join-Path $ProjectRoot $TemporaryDirectory

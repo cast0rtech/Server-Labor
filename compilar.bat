@@ -307,7 +307,21 @@ if errorlevel 1 (
 )
 echo.
 
-:: 7. Limpieza final
+:: 7. Instaladores de actualizacion (Servidor y Sonda)
+for %%U in (update_servidor.iss update_sonda.iss) do (
+    if exist "%%U" (
+        echo Generando %%U...
+        "%ISCC%" "%%U"
+        if errorlevel 1 (
+            echo [ERROR] Fallo la generacion de %%U.
+            pause
+            exit /b 1
+        )
+    )
+)
+echo.
+
+:: 7b. Limpieza final
 echo Limpiando basura temporal...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist

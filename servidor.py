@@ -18,6 +18,8 @@ import uvicorn
 from fastapi import FastAPI, Response
 from fastapi.responses import HTMLResponse
 
+from version_check import APP_VERSION, check_for_update
+
 iperf_process: Optional[subprocess.Popen] = None
 iperf_lock = threading.Lock()
 
@@ -163,7 +165,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="RedLab Tester",
     description="Panel de control del servidor central de pruebas de rendimiento de red.",
-    version="0.2.1",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -183,6 +185,12 @@ async def status() -> dict[str, Any]:
         "iperf_ready": is_port_open("127.0.0.1", 5201),
         "message": "Servidor central listo para recibir pruebas desde SondaCliente.",
     }
+
+
+@app.get("/api/version")
+async def version() -> dict:
+    """Versión instalada y si hay una actualización disponible."""
+    return {"version": APP_VERSION, "update": check_for_update()}
 
 
 @app.get("/api/info")
@@ -328,6 +336,10 @@ if __name__ == "__main__":
     print("=" * 64)
     print("           RedLab Tester - Servidor Central")
     print("=" * 64)
+    print(f"Versión: {APP_VERSION}")
+    _upd = check_for_update()
+    if _upd:
+        print(f"[ACTUALIZACIÓN] Nueva versión {_upd['version']}: {_upd['url']}")
     if iperf_ready:
         print("[OK] Receptor iperf3: ACTIVO en puerto 5201 (Listo para pruebas)")
     else:

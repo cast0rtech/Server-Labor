@@ -1,5 +1,5 @@
-#define MyAppName "RedLab Tester"
-#define MyAppVersion "1.0.0"
+﻿#define MyAppName "RedLab Tester"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "RedLab"
 
 [Setup]
@@ -19,7 +19,7 @@ PrivilegesRequired=admin
 UninstallDisplayIcon={app}\ServidorLab.exe
 
 [Types]
-Name: "full"; Description: "Instalación Completa"
+Name: "full"; Description: "InstalaciÃ³n Completa"
 Name: "server"; Description: "Solo Servidor"
 Name: "client"; Description: "Solo Cliente"
 
