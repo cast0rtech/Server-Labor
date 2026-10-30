@@ -32,14 +32,71 @@ try {
         }
     }
 
-    $IperfExe = Join-Path $ProjectRoot 'tools\iperf3.exe'
+    $ToolsDir = Join-Path $ProjectRoot 'tools'
+    New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+
+    $IperfExe = Join-Path $ToolsDir 'iperf3.exe'
+    $CygwinDll = Join-Path $ToolsDir 'cygwin1.dll'
+
+    # 1. Recuperar de Empaquetado si ya existe allí
+    if (-not (Test-Path -LiteralPath $IperfExe -PathType Leaf)) {
+        $EmpaquetadoIperf = Join-Path $OutputDir 'iperf3.exe'
+        if (Test-Path -LiteralPath $EmpaquetadoIperf -PathType Leaf) {
+            Copy-Item -LiteralPath $EmpaquetadoIperf -Destination $IperfExe -Force
+        }
+    }
+    if (-not (Test-Path -LiteralPath $CygwinDll -PathType Leaf)) {
+        $EmpaquetadoCygwin = Join-Path $OutputDir 'cygwin1.dll'
+        if (Test-Path -LiteralPath $EmpaquetadoCygwin -PathType Leaf) {
+            Copy-Item -LiteralPath $EmpaquetadoCygwin -Destination $CygwinDll -Force
+        }
+    }
+
+    # 2. Buscar en PATH o rutas comunes de WinGet
     if (-not (Test-Path -LiteralPath $IperfExe -PathType Leaf)) {
         $InstalledIperf = Get-Command 'iperf3.exe' -ErrorAction SilentlyContinue
-        if (-not $InstalledIperf) {
-            throw "Falta tools\iperf3.exe y no se encontró iperf3.exe en PATH. Coloca un binario Windows confiable en tools\iperf3.exe o instala uno y vuelve a ejecutar."
+        if ($InstalledIperf) {
+            Copy-Item -LiteralPath $InstalledIperf.Source -Destination $IperfExe -Force
+            $CandidateDll = Join-Path (Split-Path -Parent $InstalledIperf.Source) 'cygwin1.dll'
+            if (Test-Path -LiteralPath $CandidateDll -PathType Leaf) {
+                Copy-Item -LiteralPath $CandidateDll -Destination $CygwinDll -Force
+            }
+        } else {
+            $WingetSearch = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages') -Filter 'iperf3.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($WingetSearch) {
+                Copy-Item -LiteralPath $WingetSearch.FullName -Destination $IperfExe -Force
+                $CandidateDll = Join-Path (Split-Path -Parent $WingetSearch.FullName) 'cygwin1.dll'
+                if (Test-Path -LiteralPath $CandidateDll -PathType Leaf) {
+                    Copy-Item -LiteralPath $CandidateDll -Destination $CygwinDll -Force
+                }
+            }
         }
-        New-Item -ItemType Directory -Path (Split-Path -Parent $IperfExe) -Force | Out-Null
-        Copy-Item -LiteralPath $InstalledIperf.Source -Destination $IperfExe -Force
+    }
+
+    # 3. Descargar automáticamente si sigue faltando
+    if (-not (Test-Path -LiteralPath $IperfExe -PathType Leaf)) {
+        Write-Host "No se encontró iperf3.exe localmente. Descargando compilación oficial para Windows..." -ForegroundColor Yellow
+        try {
+            $ZipUrl = 'https://github.com/ar51an/iperf3-win-builds/releases/download/3.22/iperf-3.22-win64.zip'
+            $TempZip = Join-Path $ProjectRoot 'iperf3_temp.zip'
+            Invoke-WebRequest -Uri $ZipUrl -OutFile $TempZip -UseBasicParsing
+            Expand-Archive -Path $TempZip -DestinationPath $ToolsDir -Force
+            Remove-Item -LiteralPath $TempZip -Force -ErrorAction SilentlyContinue
+            Write-Host "iperf3.exe y dependencias descargadas correctamente en 'tools\'." -ForegroundColor Green
+        } catch {
+            Write-Host "No se pudo descargar iperf3 automáticamente: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $IperfExe -PathType Leaf)) {
+        throw "Falta 'tools\iperf3.exe' y no se pudo obtener automáticamente. Por favor, coloca 'iperf3.exe' y 'cygwin1.dll' en la carpeta 'tools\' o 'Empaquetado\'."
+    }
+
+    # Mantener sincronizado con Empaquetado
+    Copy-Item -LiteralPath $IperfExe -Destination (Join-Path $OutputDir 'iperf3.exe') -Force
+    if (Test-Path -LiteralPath $CygwinDll -PathType Leaf) {
+        Copy-Item -LiteralPath $CygwinDll -Destination (Join-Path $OutputDir 'cygwin1.dll') -Force
     }
 
     if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {

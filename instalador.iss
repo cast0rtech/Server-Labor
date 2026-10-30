@@ -30,8 +30,25 @@ Name: "client"; Description: "Cliente (pruebas desde el switch)"; Types: full cl
 [Files]
 Source: "Empaquetado\ServidorLab.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: server
 Source: "Empaquetado\SondaCliente.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: client
+
+#if FileExists("tools\iperf3.exe")
 Source: "tools\iperf3.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: server or client
+#elif FileExists("Empaquetado\iperf3.exe")
+Source: "Empaquetado\iperf3.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: server or client
+#elif FileExists("iperf3.exe")
+Source: "iperf3.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: server or client
+#else
+#error "No se encontro iperf3.exe en 'tools\', 'Empaquetado\' ni en la raiz. Copia iperf3.exe antes de compilar."
+#endif
+
+#if FileExists("tools\cygwin1.dll")
 Source: "tools\cygwin1.dll"; DestDir: "{app}"; Flags: ignoreversion; Components: server or client
+#elif FileExists("Empaquetado\cygwin1.dll")
+Source: "Empaquetado\cygwin1.dll"; DestDir: "{app}"; Flags: ignoreversion; Components: server or client
+#elif FileExists("cygwin1.dll")
+Source: "cygwin1.dll"; DestDir: "{app}"; Flags: ignoreversion; Components: server or client
+#endif
+
 Source: ".env.example"; DestDir: "{app}"; DestName: ".env.example"; Flags: ignoreversion; Components: client
 
 [Icons]

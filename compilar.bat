@@ -175,7 +175,7 @@ echo [OK] Python detectado: %PYTHON_CMD%
 echo.
 
 :: 3. Instalar requerimientos
-echo [1/5] Instalando dependencias con %PYTHON_CMD% -m pip...
+echo [1/6] Instalando dependencias con %PYTHON_CMD% -m pip...
 %PYTHON_CMD% -m pip install --upgrade pip
 %PYTHON_CMD% -m pip install pyinstaller influxdb-client python-dotenv fastapi uvicorn
 if errorlevel 1 (
@@ -185,15 +185,72 @@ if errorlevel 1 (
 )
 echo.
 
-:: 4. Limpieza previa
-echo [2/5] Limpiando carpetas de compilaciones anteriores...
+:: 4. Preparar y sincronizar dependencias de iperf3
+echo [2/6] Verificando dependencias de iperf3...
+if not exist tools mkdir tools
+if not exist Empaquetado mkdir Empaquetado
+
+:: 4.1 Si existe en Empaquetado pero no en tools, recuperar a tools
+if not exist "tools\iperf3.exe" if exist "Empaquetado\iperf3.exe" (
+    copy /Y "Empaquetado\iperf3.exe" "tools\iperf3.exe" >nul
+)
+if not exist "tools\cygwin1.dll" if exist "Empaquetado\cygwin1.dll" (
+    copy /Y "Empaquetado\cygwin1.dll" "tools\cygwin1.dll" >nul
+)
+
+:: 4.2 Si no existe en tools, buscar en PATH
+if not exist "tools\iperf3.exe" (
+    for /f "delims=" %%I in ('where iperf3.exe 2^>nul') do (
+        if not exist "tools\iperf3.exe" (
+            copy /Y "%%~I" "tools\iperf3.exe" >nul
+            if exist "%%~dpIcygwin1.dll" copy /Y "%%~dpIcygwin1.dll" "tools\cygwin1.dll" >nul
+        )
+    )
+)
+
+:: 4.3 Si sigue faltando, intentar descargar compilacion oficial automaticamente
+if not exist "tools\iperf3.exe" (
+    echo [INFO] Descargando binarios de iperf3 para Windows...
+    powershell -NoProfile -Command "try { $u='https://github.com/ar51an/iperf3-win-builds/releases/download/3.22/iperf-3.22-win64.zip'; $z='iperf3_temp.zip'; Invoke-WebRequest -Uri $u -OutFile $z -UseBasicParsing; Expand-Archive -Path $z -DestinationPath 'tools' -Force; Remove-Item $z -Force } catch { }" >nul 2>&1
+)
+
+:: 4.4 Sincronizar hacia Empaquetado
+if exist "tools\iperf3.exe" copy /Y "tools\iperf3.exe" "Empaquetado\iperf3.exe" >nul
+if exist "tools\cygwin1.dll" copy /Y "tools\cygwin1.dll" "Empaquetado\cygwin1.dll" >nul
+
+:: 4.5 Si todavia falta, pausar y verificar obligatoriamente
+if not exist "tools\iperf3.exe" (
+    color 0E
+    echo.
+    echo [ADVERTENCIA] No se encontro "iperf3.exe" en la carpeta "tools" ni "Empaquetado".
+    echo Inno Setup y PyInstaller requieren "iperf3.exe" para poder generar el instalador.
+    echo Por favor, copia "iperf3.exe" y "cygwin1.dll" en la carpeta "tools" o "Empaquetado".
+    echo Presiona una tecla tras haberlo copiado para continuar...
+    pause
+    if exist "Empaquetado\iperf3.exe" copy /Y "Empaquetado\iperf3.exe" "tools\iperf3.exe" >nul
+    if not exist "tools\iperf3.exe" (
+        color 0C
+        echo.
+        echo [ERROR] Sigue sin encontrarse "iperf3.exe". Compilacion abortada.
+        pause
+        exit /b 1
+    )
+    if exist "tools\iperf3.exe" copy /Y "tools\iperf3.exe" "Empaquetado\iperf3.exe" >nul
+    if exist "tools\cygwin1.dll" copy /Y "tools\cygwin1.dll" "Empaquetado\cygwin1.dll" >nul
+    color 0A
+)
+echo [OK] iperf3 y librerias listos.
+echo.
+
+:: 5. Limpieza previa
+echo [3/6] Limpiando carpetas de compilaciones anteriores...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 if exist *.spec del /q *.spec
 echo.
 
-:: 5. Compilar con PyInstaller invocando el modulo de Python directamente
-echo [3/5] Compilando cliente.py (con GUI) y servidor.py a .exe...
+:: 6. Compilar con PyInstaller invocando el modulo de Python directamente
+echo [4/6] Compilando cliente.py (con GUI) y servidor.py a .exe...
 set "ADD_BIN="
 if exist "tools\iperf3.exe" set "ADD_BIN=--add-binary tools/iperf3.exe;."
 if exist "tools\cygwin1.dll" set "ADD_BIN=%ADD_BIN% --add-binary tools/cygwin1.dll;."
@@ -213,8 +270,8 @@ if errorlevel 1 (
 )
 echo.
 
-:: 6. Mover a la carpeta Empaquetado
-echo [4/5] Moviendo archivos ejecutables...
+:: 7. Mover a la carpeta Empaquetado
+echo [5/6] Moviendo archivos ejecutables...
 if not exist Empaquetado mkdir Empaquetado
 
 if exist dist\SondaCliente.exe (
@@ -235,32 +292,12 @@ if exist dist\ServidorLab.exe (
 echo Ejecutables listos en carpeta Empaquetado.
 echo.
 
-:: RECORDATORIO Y SINCRONIZACION IPERF3 Y CYGWIN1
+:: Asegurar sincronizacion final de binarios auxiliares
 if exist "tools\iperf3.exe" copy /Y "tools\iperf3.exe" "Empaquetado\iperf3.exe" >nul
 if exist "tools\cygwin1.dll" copy /Y "tools\cygwin1.dll" "Empaquetado\cygwin1.dll" >nul
 
-if not exist "tools\iperf3.exe" if not exist "Empaquetado\iperf3.exe" (
-    color 0E
-    echo.
-    echo [ADVERTENCIA] No se encontro "iperf3.exe" en la carpeta "tools" ni "Empaquetado".
-    echo Inno Setup requiere "iperf3.exe" para poder generar el instalador.
-    echo Por favor, copia "iperf3.exe" en la carpeta "Empaquetado" o "tools".
-    echo Presiona una tecla tras copiarlo para continuar...
-    pause
-    if exist "Empaquetado\iperf3.exe" (
-        if not exist tools mkdir tools
-        copy /Y "Empaquetado\iperf3.exe" "tools\iperf3.exe" >nul
-    )
-    if exist "tools\iperf3.exe" (
-        if not exist Empaquetado mkdir Empaquetado
-        copy /Y "tools\iperf3.exe" "Empaquetado\iperf3.exe" >nul
-    )
-    color 0A
-    echo.
-)
-
-:: 6. Crear el instalador final
-echo [5/5] Generando instalador .exe con Inno Setup...
+:: 8. Crear el instalador final
+echo [6/6] Generando instalador .exe con Inno Setup...
 "%ISCC%" instalador.iss
 if errorlevel 1 (
     echo.
