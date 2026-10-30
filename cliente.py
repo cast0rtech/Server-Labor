@@ -39,7 +39,7 @@ APP_TITLE = "RedLab Tester - Sonda de Medición"
 MEASUREMENT = "iperf_tcp"
 DEFAULT_PORT = 5201
 DEFAULT_DURATION = 10  # Por defecto 10 s para pruebas rápidas, configurable a 30 s
-DEFAULT_INFLUX_URL = "http://localhost:8086"
+DEFAULT_INFLUX_URL = "http://localhost:4000"
 DEFAULT_INFLUX_ORG = "red_lab"
 DEFAULT_INFLUX_BUCKET = "iperf_stats"
 DEFAULT_INFLUX_TOKEN = "lab_token_secure"
@@ -98,6 +98,19 @@ def find_iperf3_binary() -> Optional[Path]:
         return Path(which_iperf).resolve()
 
     return None
+
+
+def test_tcp_connectivity(host: str, port: int, timeout: float = 3.0) -> tuple[bool, str]:
+    """Comprueba si el puerto TCP del servidor es alcanzable."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, "Conexión exitosa"
+    except socket.gaierror:
+        return False, f"No se pudo resolver '{host}'."
+    except socket.timeout:
+        return False, f"Tiempo de espera agotado hacia {host}:{port}."
+    except OSError as e:
+        return False, f"Sin conexión con {host}:{port}: {e}"
 
 
 def run_iperf3_test(
@@ -170,9 +183,25 @@ def run_iperf3_test(
 
             if elapsed > max_timeout:
                 process.kill()
-                process.communicate()
+                try:
+                    _, err_tail = process.communicate(timeout=2)
+                except Exception:
+                    err_tail = ""
+                reachable, _ = test_tcp_connectivity(server_ip, port, timeout=3.0)
+                if reachable:
+                    hint = (
+                        "El puerto responde, pero la prueba no avanza. Causas habituales: "
+                        "el servidor iperf3 está ocupado con otra prueba (cierra y abre de nuevo ServidorLab), "
+                        "un antivirus/firewall bloquea el tráfico de datos, o el servidor es otro programa distinto de iperf3."
+                    )
+                else:
+                    hint = (
+                        f"No hay conexión con {server_ip}:{port}. Comprueba la IP, que ServidorLab esté abierto "
+                        "en ese equipo y que el Firewall de Windows permita el puerto TCP 5201."
+                    )
+                detail = f" Detalle: {err_tail.strip()}" if err_tail and err_tail.strip() else ""
                 raise TimeoutError(
-                    f"La prueba de iperf3 superó el tiempo máximo ({max_timeout}s) sin responder."
+                    f"La prueba superó el tiempo máximo ({max_timeout} s) sin respuesta. {hint}{detail}"
                 )
 
     if not stdout and stderr:
@@ -745,9 +774,10 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
             log("Prueba cancelada por el usuario.")
             root.after(0, lambda: status_msg_var.set("Prueba cancelada."))
         except Exception as ex:
-            log(f"ERROR: {ex}")
-            root.after(0, lambda: status_msg_var.set(f"Fallo en la prueba: {ex}"))
-            root.after(0, lambda: messagebox.showerror("Error en la prueba", str(ex)))
+            error_text = str(ex) or f"{type(ex).__name__}: error desconocido"
+            log(f"ERROR: {error_text}")
+            root.after(0, lambda msg=error_text: status_msg_var.set(f"Fallo en la prueba: {msg}"))
+            root.after(0, lambda msg=error_text: messagebox.showerror("Error en la prueba", msg))
         finally:
             with is_running_lock:
                 is_running = False

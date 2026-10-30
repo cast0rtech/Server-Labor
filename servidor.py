@@ -20,6 +20,9 @@ from fastapi.responses import HTMLResponse
 
 from version_check import APP_VERSION, check_for_update
 
+GRAFANA_PORT = 7500
+INFLUX_PORT = 4000
+
 iperf_process: Optional[subprocess.Popen] = None
 iperf_lock = threading.Lock()
 
@@ -198,8 +201,8 @@ async def info() -> dict:
     """Información de diagnóstico del servidor."""
     local_ips = get_local_ips()
     iperf_active = is_port_open("127.0.0.1", 5201)
-    influx_active = is_port_open("127.0.0.1", 8086)
-    grafana_active = is_port_open("127.0.0.1", 3000)
+    influx_active = is_port_open("127.0.0.1", INFLUX_PORT)
+    grafana_active = is_port_open("127.0.0.1", GRAFANA_PORT)
     return {
         "status": "ready",
         "hostname": platform.node(),
@@ -216,8 +219,8 @@ async def dashboard() -> str:
     """Panel de control visual web accesible desde el navegador."""
     local_ips = get_local_ips()
     iperf_ok = is_port_open("127.0.0.1", 5201)
-    influx_ok = is_port_open("127.0.0.1", 8086)
-    grafana_ok = is_port_open("127.0.0.1", 3000)
+    influx_ok = is_port_open("127.0.0.1", INFLUX_PORT)
+    grafana_ok = is_port_open("127.0.0.1", GRAFANA_PORT)
 
     status_badge = (
         '<span style="background:#10B981; color:#fff; padding:6px 14px; border-radius:999px; font-weight:600; font-size:0.85rem;">● SERVIDOR IPERF3 ACTIVO (Puerto 5201)</span>'
@@ -233,8 +236,8 @@ async def dashboard() -> str:
         for ip in local_ips
     )
 
-    influx_status_text = '<span style="color:#10B981;">● Online (:8086)</span>' if influx_ok else '<span style="color:#94A3B8;">○ Inactivo (Docker opcional)</span>'
-    grafana_status_text = '<span style="color:#10B981;">● Online (:3000)</span>' if grafana_ok else '<span style="color:#94A3B8;">○ Inactivo (Docker opcional)</span>'
+    influx_status_text = f'<span style="color:#10B981;">● Online (:{INFLUX_PORT})</span>' if influx_ok else '<span style="color:#94A3B8;">○ Inactivo (Docker opcional)</span>'
+    grafana_status_text = f'<span style="color:#10B981;">● Online (:{GRAFANA_PORT})</span>' if grafana_ok else '<span style="color:#94A3B8;">○ Inactivo (Docker opcional)</span>'
 
     return f"""<!DOCTYPE html>
 <html lang="es">
@@ -303,11 +306,11 @@ async def dashboard() -> str:
 
             <h3 style="color:#CBD5E1; font-size:1rem; margin-top:20px; margin-bottom:8px;">Estado de Servicios Asociados</h3>
             <div class="links-grid">
-                <a href="http://localhost:3000" target="_blank" class="link-btn">
+                <a href="http://localhost:{GRAFANA_PORT}" target="_blank" class="link-btn">
                     <span>📊 Grafana</span>
                     <span class="info-pill">{grafana_status_text}</span>
                 </a>
-                <a href="http://localhost:8086" target="_blank" class="link-btn">
+                <a href="http://localhost:{INFLUX_PORT}" target="_blank" class="link-btn">
                     <span>🗄️ InfluxDB</span>
                     <span class="info-pill">{influx_status_text}</span>
                 </a>
@@ -330,8 +333,8 @@ async def dashboard() -> str:
 if __name__ == "__main__":
     local_ips = get_local_ips()
     iperf_ready = ensure_local_iperf_server()
-    influx_ready = is_port_open("127.0.0.1", 8086)
-    grafana_ready = is_port_open("127.0.0.1", 3000)
+    influx_ready = is_port_open("127.0.0.1", INFLUX_PORT)
+    grafana_ready = is_port_open("127.0.0.1", GRAFANA_PORT)
 
     print("=" * 64)
     print("           RedLab Tester - Servidor Central")
@@ -347,7 +350,7 @@ if __name__ == "__main__":
 
     print(f"[OK] Panel Web:        http://localhost:8000")
     if influx_ready and grafana_ready:
-        print("[OK] Docker Stack:     InfluxDB (:8086) y Grafana (:3000) ONLINE")
+        print(f"[OK] Docker Stack:     InfluxDB (:{INFLUX_PORT}) y Grafana (:{GRAFANA_PORT}) ONLINE")
     else:
         print("[INFO] Docker Stack:    Desconectado (Opcional: 'docker compose up -d')")
 

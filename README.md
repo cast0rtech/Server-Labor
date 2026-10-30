@@ -5,7 +5,7 @@ RedLab Tester reúne un servidor de pruebas de red, almacenamiento de métricas 
 ## Componentes
 
 - **InfluxDB 2.7**: organización `red_lab`, bucket `iperf_stats` y token inicial `lab_token_secure`.
-- **Grafana**: accesible en el puerto `3000`, con la fuente InfluxDB aprovisionada automáticamente.
+- **Grafana**: accesible en el puerto `7500`, con la fuente InfluxDB aprovisionada automáticamente.
 - **iperf3 servidor**: contenedor `networkstatic/iperf3`, escuchando en TCP y UDP `5201`.
 - **API FastAPI**: `servidor.py`, endpoint `GET /status` en el puerto `8000`.
 - **Cliente de medición**: `cliente.py`, prueba TCP de 30 segundos y escritura síncrona de métricas a InfluxDB.
@@ -23,8 +23,8 @@ Interfaces y puertos:
 
 | Servicio | Dirección |
 |---|---|
-| InfluxDB | `http://localhost:8086` |
-| Grafana | `http://localhost:3000` |
+| InfluxDB | `http://localhost:4000` |
+| Grafana | `http://localhost:7500` |
 | iperf3 | TCP/UDP `5201` |
 | API RedLab | `http://localhost:8000/status` |
 
@@ -60,13 +60,13 @@ Edita `.env` con los valores del laboratorio:
 ```dotenv
 IPERF_SERVER_IP=192.168.1.10
 SWITCH_ID=switch-01
-INFLUX_URL=http://192.168.1.10:8086
+INFLUX_URL=http://192.168.1.10:4000
 INFLUX_ORG=red_lab
 INFLUX_BUCKET=iperf_stats
 INFLUX_TOKEN=lab_token_secure
 ```
 
-`IPERF_SERVER_IP` es la dirección del servidor iperf3. `INFLUX_URL` es la dirección de InfluxDB accesible desde el cliente; si el cliente corre en el mismo equipo que Docker, puede ser `http://localhost:8086`. No uses `localhost` si InfluxDB está en otro equipo.
+`IPERF_SERVER_IP` es la dirección del servidor iperf3. `INFLUX_URL` es la dirección de InfluxDB accesible desde el cliente; si el cliente corre en el mismo equipo que Docker, puede ser `http://localhost:4000`. No uses `localhost` si InfluxDB está en otro equipo.
 
 Al ejecutar `cliente.py` (o `SondaCliente.exe`), se abre la **Interfaz Gráfica (GUI)** interactiva donde puedes introducir directamente la **IP del servidor**, el puerto, el identificador del switch y la duración de la prueba, además de visualizar en tiempo real el ancho de banda (Mbps) y las retransmisiones TCP.
 

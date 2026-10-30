@@ -147,6 +147,9 @@ try {
             throw "PyInstaller terminó, pero no generó el archivo esperado: $BuiltExecutable"
         }
         $Destination = Join-Path $OutputDir $ExecutableName
+        if (Test-Path -LiteralPath $Destination) {
+            Remove-Item -LiteralPath $Destination -Force
+        }
         Move-Item -LiteralPath $BuiltExecutable -Destination $Destination -Force
     }
 
