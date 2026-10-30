@@ -262,6 +262,10 @@ def send_metrics_to_influx(
     if not INFLUX_AVAILABLE:
         raise RuntimeError("El cliente de InfluxDB no está instalado en este entorno.")
 
+    url_clean = influx_url.strip()
+    if not (url_clean.startswith("http://") or url_clean.startswith("https://")):
+        url_clean = f"http://{url_clean}"
+
     hostname = platform.node() or "desconocido"
     point = (
         Point(MEASUREMENT)
@@ -273,7 +277,7 @@ def send_metrics_to_influx(
         .time(datetime.now(timezone.utc), WritePrecision.NS)
     )
 
-    with InfluxDBClient(url=influx_url, token=influx_token, org=influx_org) as db:
+    with InfluxDBClient(url=url_clean, token=influx_token, org=influx_org, timeout=10_000) as db:
         with db.write_api(write_options=SYNCHRONOUS) as writer:
             writer.write(bucket=influx_bucket, org=influx_org, record=point)
 
@@ -329,7 +333,12 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
     duration_var = tk.StringVar(value=str(DEFAULT_DURATION))
 
     send_influx_var = tk.BooleanVar(value=True)
-    influx_url_var = tk.StringVar(value=os.getenv("INFLUX_URL", DEFAULT_INFLUX_URL))
+    raw_influx_url = os.getenv("INFLUX_URL", DEFAULT_INFLUX_URL).strip()
+    if ":8086" in raw_influx_url:
+        raw_influx_url = raw_influx_url.replace(":8086", ":4000")
+    if not (raw_influx_url.startswith("http://") or raw_influx_url.startswith("https://")):
+        raw_influx_url = f"http://{raw_influx_url}"
+    influx_url_var = tk.StringVar(value=raw_influx_url)
     influx_org_var = tk.StringVar(value=os.getenv("INFLUX_ORG", DEFAULT_INFLUX_ORG))
     influx_bucket_var = tk.StringVar(value=os.getenv("INFLUX_BUCKET", DEFAULT_INFLUX_BUCKET))
     influx_token_var = tk.StringVar(value=os.getenv("INFLUX_TOKEN", DEFAULT_INFLUX_TOKEN))
@@ -476,9 +485,29 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
     influx_details_frame.pack(fill=tk.X)
 
     # Influx URL y Bucket en dos columnas
-    tk.Label(influx_details_frame, text="URL InfluxDB:", font=("Segoe UI", 8), bg=BG_CARD).grid(
-        row=0, column=0, sticky="w"
+    url_frame_top = tk.Frame(influx_details_frame, bg=BG_CARD)
+    url_frame_top.grid(row=0, column=0, sticky="ew")
+    tk.Label(url_frame_top, text="URL InfluxDB:", font=("Segoe UI", 8), bg=BG_CARD).pack(side=tk.LEFT)
+    
+    def _sync_influx_ip():
+        sip = server_ip_var.get().strip() or "localhost"
+        influx_url_var.set(f"http://{sip}:4000")
+        log(f"URL de InfluxDB actualizada a: http://{sip}:4000")
+
+    btn_sync_ip = tk.Button(
+        url_frame_top,
+        text="🔄 Usar IP Servidor (:4000)",
+        font=("Segoe UI", 7),
+        bg="#E0E7FF",
+        fg="#1E40AF",
+        relief=tk.FLAT,
+        padx=4,
+        pady=0,
+        cursor="hand2",
+        command=_sync_influx_ip,
     )
+    btn_sync_ip.pack(side=tk.RIGHT)
+
     ttk.Entry(influx_details_frame, textvariable=influx_url_var, font=("Segoe UI", 9)).grid(
         row=1, column=0, sticky="ew", padx=(0, 8), pady=(0, 4)
     )
@@ -716,12 +745,31 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
 
         send_to_db = send_influx_var.get()
         influx_url = influx_url_var.get().strip()
+        if not (influx_url.startswith("http://") or influx_url.startswith("https://")):
+            influx_url = f"http://{influx_url}"
         influx_org = influx_org_var.get().strip()
         influx_bucket = influx_bucket_var.get().strip()
         influx_token = influx_token_var.get().strip()
 
         root.after(0, lambda: progress_bar.start(10))
-        root.after(0, lambda: status_msg_var.set(f"Conectando a {server_ip}:{port}..."))
+        root.after(0, lambda: status_msg_var.set(f"Comprobando conexión con {server_ip}:{port}..."))
+        log(f"Comprobando conectividad con {server_ip}:{port}...")
+
+        reachable, err_diag = test_tcp_connectivity(server_ip, port, timeout=2.5)
+        if not reachable:
+            msg = (
+                f"No se pudo conectar con el servidor en {server_ip}:{port}.\n\n"
+                f"Diagnóstico: {err_diag}\n\n"
+                "Comprobaciones recomendadas:\n"
+                "1. Introduce en 'IP o Hostname' la IP de red local del servidor (ej. 192.168.x.x en lugar de una IP de VPN).\n"
+                "2. Confirma que 'ServidorLab.exe' esté ejecutándose en el servidor.\n"
+                "3. Asegúrate de que el Firewall de Windows en el servidor permita el puerto TCP 5201."
+            )
+            log(f"ERROR: Sin conexión con {server_ip}:{port} ({err_diag})")
+            root.after(0, lambda: status_msg_var.set(f"Sin conexión con {server_ip}:{port}"))
+            root.after(0, lambda m=msg: messagebox.showerror("Error de Conexión", m))
+            return
+
         log(f"Iniciando prueba TCP hacia {server_ip}:{port} ({duration} s)")
 
         def on_test_progress(curr, total):

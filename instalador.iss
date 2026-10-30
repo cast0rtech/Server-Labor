@@ -1,4 +1,4 @@
-﻿#define MyAppName "RedLab Tester"
+#define MyAppName "RedLab Tester"
 #define MyAppVersion "1.0.1"
 #define MyAppPublisher "RedLab"
 
@@ -57,6 +57,6 @@ Name: "{group}\RedLab Tester - Cliente"; Filename: "{app}\SondaCliente.exe"; Wor
 Name: "{group}\Desinstalar RedLab Tester"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RedLab iperf3 TCP 5201"" dir=in action=allow protocol=TCP localport=5201"; Flags: runhidden; StatusMsg: "Abriendo el puerto TCP 5201 en el Firewall de Windows..."; Components: server
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RedLab Suite (5201, 4000, 7500, 8000)"" dir=in action=allow protocol=TCP localport=5201,4000,7500,8000"; Flags: runhidden; StatusMsg: "Configurando el Firewall de Windows para RedLab (puertos 5201, 4000, 7500, 8000)..."; Components: server
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RedLab iperf3 UDP 5201"" dir=in action=allow protocol=UDP localport=5201"; Flags: runhidden; StatusMsg: "Abriendo el puerto UDP 5201 en el Firewall de Windows..."; Components: server
 Filename: "{app}\ServidorLab.exe"; Description: "Iniciar el panel de control RedLab Tester"; Flags: postinstall nowait skipifsilent; Components: server

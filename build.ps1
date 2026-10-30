@@ -116,12 +116,11 @@ try {
         throw 'No se pudo activar el entorno virtual .venv.'
     }
 
-    Invoke-CheckedCommand -Description 'Actualizando pip' -Command {
-        & $PythonExe -m pip install --upgrade pip
-    }
-
-    Invoke-CheckedCommand -Description 'Instalando dependencias de compilación y ejecución' -Command {
-        & $PythonExe -m pip install pyinstaller influxdb-client python-dotenv fastapi uvicorn
+    $HasPyInstaller = Test-Path (Join-Path $VenvPath 'Scripts\pyinstaller.exe')
+    if (-not $HasPyInstaller) {
+        Invoke-CheckedCommand -Description 'Instalando dependencias de compilación y ejecución' -Command {
+            & $PythonExe -m pip install pyinstaller influxdb-client python-dotenv fastapi uvicorn
+        }
     }
 
     $PyInstallerAddBinary = @()
@@ -148,7 +147,15 @@ try {
         }
         $Destination = Join-Path $OutputDir $ExecutableName
         if (Test-Path -LiteralPath $Destination) {
-            Remove-Item -LiteralPath $Destination -Force
+            try {
+                Remove-Item -LiteralPath $Destination -Force -ErrorAction Stop
+            } catch {
+                $OldBackup = "$Destination.old"
+                if (Test-Path -LiteralPath $OldBackup) {
+                    try { Remove-Item -LiteralPath $OldBackup -Force -ErrorAction SilentlyContinue } catch {}
+                }
+                Move-Item -LiteralPath $Destination -Destination $OldBackup -Force
+            }
         }
         Move-Item -LiteralPath $BuiltExecutable -Destination $Destination -Force
     }

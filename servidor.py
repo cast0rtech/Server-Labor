@@ -1,7 +1,15 @@
-"""Panel de control del servidor central de RedLab Tester."""
+"""Panel de control del servidor central de RedLab Tester.
+
+Gestiona de forma nativa en Windows:
+- Servidor iPerf3 (puerto TCP 5201)
+- Base de datos InfluxDB v2 (puerto TCP 4000)
+- Visualización en Grafana (puerto TCP 7500)
+- Panel Web de Control (puerto TCP 8000)
+"""
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import shutil
@@ -12,24 +20,46 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import uvicorn
 from fastapi import FastAPI, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
+from stack_manager import (
+    GRAFANA_PASSWORD,
+    GRAFANA_PORT,
+    GRAFANA_USER,
+    INFLUX_BUCKET,
+    INFLUX_ORG,
+    INFLUX_PORT,
+    INFLUX_TOKEN,
+    is_port_open,
+    stack_manager,
+)
 from version_check import APP_VERSION, check_for_update
 
-GRAFANA_PORT = 7500
-INFLUX_PORT = 4000
+logger = logging.getLogger("RedLab.Server")
 
 iperf_process: Optional[subprocess.Popen] = None
 iperf_lock = threading.Lock()
 
 
-def get_local_ips() -> list[str]:
-    """Obtiene todas las IPs locales IPv4 de las interfaces de red."""
+def get_classified_ips() -> dict[str, Any]:
+    """Obtiene y clasifica las IPs locales en Primaria (LAN) y Secundarias (VPN/WSL/Virtuales)."""
     ips: set[str] = set()
+    primary_ip = ""
+
+    # Determinar IP principal mediante ruta saliente (gateway default)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            primary_ip = s.getsockname()[0]
+            ips.add(primary_ip)
+    except Exception:
+        pass
+
+    # Enumerar todas las interfaces disponibles
     try:
         hostname = socket.gethostname()
         for ip in socket.gethostbyname_ex(hostname)[2]:
@@ -38,27 +68,30 @@ def get_local_ips() -> list[str]:
     except Exception:
         pass
 
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            main_ip = s.getsockname()[0]
-            ips.add(main_ip)
-    except Exception:
-        pass
-
     if not ips:
         ips.add("127.0.0.1")
-    return sorted(list(ips))
+    if not primary_ip:
+        primary_ip = next(iter(ips))
 
+    classified: list[dict[str, str]] = []
+    for ip in sorted(list(ips)):
+        is_primary = (ip == primary_ip)
+        notes = []
+        if is_primary:
+            notes.append("⭐ Red Local (LAN Recomendada)")
+        if ip.startswith("192.168.56."):
+            notes.append("VirtualBox Host-Only")
+        elif ip.startswith("172.2") or ip.startswith("172.1") or ip.startswith("172.3"):
+            notes.append("WSL / Hyper-V Virtual")
+        elif ip.startswith("10.") and not is_primary:
+            notes.append("VPN / Red Corporativa")
 
-def is_port_open(host: str, port: int) -> bool:
-    """Verifica si un puerto TCP está abierto y respondiendo."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.6)
-            return s.connect_ex((host, port)) == 0
-    except Exception:
-        return False
+        tag = " - ".join(notes) if notes else "Interfaz de red"
+        classified.append({"ip": ip, "is_primary": is_primary, "tag": tag})
+
+    # Ordenar poniendo la primaria primero
+    classified.sort(key=lambda x: (not x["is_primary"], x["ip"]))
+    return {"primary": primary_ip, "all": classified}
 
 
 def find_iperf3_binary() -> Optional[Path]:
@@ -71,7 +104,7 @@ def find_iperf3_binary() -> Optional[Path]:
         candidates.append(meipass_dir / "iperf3.exe")
         candidates.append(meipass_dir / "tools" / "iperf3.exe")
 
-    # 2. Junto al ejecutable o en su subcarpeta tools
+    # 2. Junto al ejecutable o en subcarpeta tools
     app_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
     candidates.extend([
         app_dir / "iperf3.exe",
@@ -104,15 +137,16 @@ def find_iperf3_binary() -> Optional[Path]:
 
 
 def configure_windows_firewall() -> bool:
-    """Intenta habilitar la regla de entrada en el Firewall de Windows para el puerto TCP 5201."""
+    """Habilita la regla de entrada en el Firewall de Windows para los puertos del stack."""
     if sys.platform != "win32":
         return True
+    ports = f"5201,{INFLUX_PORT},{GRAFANA_PORT},8000"
+    cmd = [
+        "netsh", "advfirewall", "firewall", "add", "rule",
+        f"name=RedLab Tester Suite ({ports})",
+        "dir=in", "action=allow", "protocol=TCP", f"localport={ports}",
+    ]
     try:
-        cmd = [
-            "netsh", "advfirewall", "firewall", "add", "rule",
-            "name=RedLab iperf3 TCP 5201",
-            "dir=in", "action=allow", "protocol=TCP", "localport=5201",
-        ]
         res = subprocess.run(
             cmd,
             capture_output=True,
@@ -129,7 +163,7 @@ def ensure_local_iperf_server() -> bool:
     global iperf_process
     with iperf_lock:
         if is_port_open("127.0.0.1", 5201):
-            return True  # Ya hay un servidor (Docker u otro) escuchando
+            return True
 
         iperf_bin = find_iperf3_binary()
         if not iperf_bin:
@@ -147,15 +181,30 @@ def ensure_local_iperf_server() -> bool:
             )
             time.sleep(0.5)
             return is_port_open("127.0.0.1", 5201)
-        except Exception:
+        except Exception as e:
+            logger.error("Error al arrancar iperf3: %s", e)
             return False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Gestión del ciclo de vida de la aplicación con lifespan."""
+    """Gestión del ciclo de vida del servidor central."""
+    # 1. Configurar firewall de Windows
+    configure_windows_firewall()
+
+    # 2. Iniciar iperf3
     ensure_local_iperf_server()
+
+    # 3. Iniciar stack nativo InfluxDB + Grafana si ya están presentes
+    if stack_manager.is_stack_installed():
+        threading.Thread(target=stack_manager.setup_and_start_all, daemon=True).start()
+    else:
+        # Descarga e inicialización asistida en segundo plano
+        stack_manager.install_native_stack_async()
+
     yield
+
+    # Limpieza al apagar el servidor
     global iperf_process
     with iperf_lock:
         if iperf_process and iperf_process.poll() is None:
@@ -164,10 +213,12 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+    stack_manager.stop_all()
+
 
 app = FastAPI(
     title="RedLab Tester",
-    description="Panel de control del servidor central de pruebas de rendimiento de red.",
+    description="Servidor central de pruebas de rendimiento de red, telemetría y dashboards.",
     version=APP_VERSION,
     lifespan=lifespan,
 )
@@ -181,11 +232,17 @@ async def favicon() -> Response:
 
 @app.get("/status")
 async def status() -> dict[str, Any]:
-    """Indica que el servidor central está listo para recibir pruebas."""
+    """Indica el estado del servidor y puertos clave."""
+    info_ips = get_classified_ips()
     return {
         "status": "ready",
+        "primary_ip": info_ips["primary"],
         "iperf_port": 5201,
         "iperf_ready": is_port_open("127.0.0.1", 5201),
+        "influx_port": INFLUX_PORT,
+        "influx_ready": is_port_open("127.0.0.1", INFLUX_PORT),
+        "grafana_port": GRAFANA_PORT,
+        "grafana_ready": is_port_open("127.0.0.1", GRAFANA_PORT),
         "message": "Servidor central listo para recibir pruebas desde SondaCliente.",
     }
 
@@ -196,48 +253,79 @@ async def version() -> dict:
     return {"version": APP_VERSION, "update": check_for_update()}
 
 
+@app.get("/api/stack/status")
+async def stack_status() -> dict[str, Any]:
+    """Devuelve el estado en tiempo real del stack nativo y el progreso de instalación."""
+    return {
+        "iperf": is_port_open("127.0.0.1", 5201),
+        "influx": is_port_open("127.0.0.1", INFLUX_PORT),
+        "grafana": is_port_open("127.0.0.1", GRAFANA_PORT),
+        "installed": stack_manager.is_stack_installed(),
+        "download_status": stack_manager.download_status,
+        "download_progress": stack_manager.download_progress,
+    }
+
+
+@app.post("/api/stack/install")
+async def stack_install() -> dict[str, str]:
+    """Inicia la descarga e instalación automática del stack nativo si no está listo."""
+    stack_manager.install_native_stack_async()
+    return {"status": "started", "message": "Instalación del stack iniciada en segundo plano."}
+
+
 @app.get("/api/info")
 async def info() -> dict:
-    """Información de diagnóstico del servidor."""
-    local_ips = get_local_ips()
-    iperf_active = is_port_open("127.0.0.1", 5201)
-    influx_active = is_port_open("127.0.0.1", INFLUX_PORT)
-    grafana_active = is_port_open("127.0.0.1", GRAFANA_PORT)
+    """Información completa de diagnóstico del servidor."""
+    info_ips = get_classified_ips()
     return {
         "status": "ready",
         "hostname": platform.node(),
-        "local_ips": local_ips,
+        "primary_ip": info_ips["primary"],
+        "all_ips": info_ips["all"],
         "iperf_port": 5201,
-        "iperf_active": iperf_active,
-        "influx_active": influx_active,
-        "grafana_active": grafana_active,
+        "iperf_active": is_port_open("127.0.0.1", 5201),
+        "influx_port": INFLUX_PORT,
+        "influx_active": is_port_open("127.0.0.1", INFLUX_PORT),
+        "grafana_port": GRAFANA_PORT,
+        "grafana_active": is_port_open("127.0.0.1", GRAFANA_PORT),
     }
 
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard() -> str:
     """Panel de control visual web accesible desde el navegador."""
-    local_ips = get_local_ips()
+    info_ips = get_classified_ips()
+    primary_ip = info_ips["primary"]
     iperf_ok = is_port_open("127.0.0.1", 5201)
     influx_ok = is_port_open("127.0.0.1", INFLUX_PORT)
     grafana_ok = is_port_open("127.0.0.1", GRAFANA_PORT)
 
-    status_badge = (
-        '<span style="background:#10B981; color:#fff; padding:6px 14px; border-radius:999px; font-weight:600; font-size:0.85rem;">● SERVIDOR IPERF3 ACTIVO (Puerto 5201)</span>'
+    iperf_badge = (
+        '<span class="badge badge-success">● ACTIVO (:5201)</span>'
         if iperf_ok
-        else '<span style="background:#EF4444; color:#fff; padding:6px 14px; border-radius:999px; font-weight:600; font-size:0.85rem;">▲ Puerto 5201 inactivo</span>'
+        else '<span class="badge badge-danger">▲ Inactivo (:5201)</span>'
+    )
+    influx_badge = (
+        '<span class="badge badge-success">● ACTIVO (:4000)</span>'
+        if influx_ok
+        else '<span class="badge badge-warning">○ En espera / Descargando</span>'
+    )
+    grafana_badge = (
+        '<span class="badge badge-success">● ACTIVO (:7500)</span>'
+        if grafana_ok
+        else '<span class="badge badge-warning">○ En espera / Descargando</span>'
     )
 
     ips_html = "".join(
-        f'<div style="background:#1E293B; border:1px solid #334155; padding:12px 16px; border-radius:8px; font-family:monospace; font-size:1.15rem; color:#38BDF8; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">'
-        f'<strong>{ip}</strong>'
-        f'<button onclick="navigator.clipboard.writeText(\'{ip}\'); this.innerText=\'¡Copiado!\'; setTimeout(()=>this.innerText=\'Copiar\', 1500);" style="background:#2563EB; color:#fff; border:none; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:0.85rem; font-weight:600;">Copiar</button>'
+        f'<div class="ip-row {"ip-primary" if item["is_primary"] else ""}">'
+        f'  <div>'
+        f'    <strong class="ip-addr">{item["ip"]}</strong>'
+        f'    <span class="ip-tag">{item["tag"]}</span>'
+        f'  </div>'
+        f'  <button onclick="copyText(\'{item["ip"]}\', this)" class="btn-copy">Copiar IP</button>'
         f'</div>'
-        for ip in local_ips
+        for item in info_ips["all"]
     )
-
-    influx_status_text = f'<span style="color:#10B981;">● Online (:{INFLUX_PORT})</span>' if influx_ok else '<span style="color:#94A3B8;">○ Inactivo (Docker opcional)</span>'
-    grafana_status_text = f'<span style="color:#10B981;">● Online (:{GRAFANA_PORT})</span>' if grafana_ok else '<span style="color:#94A3B8;">○ Inactivo (Docker opcional)</span>'
 
     return f"""<!DOCTYPE html>
 <html lang="es">
@@ -247,23 +335,48 @@ async def dashboard() -> str:
     <title>RedLab Tester - Servidor Central</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
-        body {{ background: #0B1120; color: #E2E8F0; padding: 32px 16px; min-height: 100vh; display: flex; justify-content: center; }}
-        .container {{ max-width: 820px; width: 100%; }}
-        .card {{ background: #131D31; border-radius: 14px; padding: 28px; margin-bottom: 20px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.5); border: 1px solid #1E293B; }}
-        .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }}
+        body {{ background: #0B1120; color: #E2E8F0; padding: 24px 16px; min-height: 100vh; display: flex; justify-content: center; }}
+        .container {{ max-width: 860px; width: 100%; }}
+        .card {{ background: #131D31; border-radius: 14px; padding: 26px; margin-bottom: 20px; box-shadow: 0 10px 20px rgba(0,0,0,0.5); border: 1px solid #1E293B; }}
+        .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px; }}
         h1 {{ font-size: 1.6rem; color: #F8FAFC; display: flex; align-items: center; gap: 10px; }}
         p.subtitle {{ color: #94A3B8; font-size: 0.95rem; line-height: 1.5; margin-bottom: 20px; }}
         
-        .instruction-box {{ background: linear-gradient(135deg, #1E3A8A 0%, #1E293B 100%); border: 1px solid #3B82F6; padding: 20px; border-radius: 12px; margin-bottom: 24px; }}
-        .instruction-box h2 {{ font-size: 1.15rem; color: #60A5FA; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }}
-        .instruction-box p {{ font-size: 0.92rem; color: #DBEAFE; line-height: 1.5; margin-bottom: 12px; }}
-        .steps {{ margin-left: 20px; font-size: 0.9rem; color: #E2E8F0; line-height: 1.7; }}
+        .badge {{ padding: 6px 14px; border-radius: 999px; font-weight: 700; font-size: 0.8rem; letter-spacing: 0.5px; }}
+        .badge-success {{ background: #10B981; color: #FFFFFF; }}
+        .badge-danger {{ background: #EF4444; color: #FFFFFF; }}
+        .badge-warning {{ background: #F59E0B; color: #1E293B; }}
 
-        .ip-card {{ background: #0F172A; border: 1px solid #334155; padding: 20px; border-radius: 12px; margin-bottom: 24px; }}
-        .links-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 16px; }}
-        .link-btn {{ background: #1E293B; color: #F1F5F9; padding: 14px; border-radius: 10px; text-decoration: none; font-weight: 500; display: flex; align-items: center; justify-content: space-between; border: 1px solid #334155; transition: all 0.2s; }}
-        .link-btn:hover {{ background: #2563EB; border-color: #3B82F6; color: #FFFFFF; transform: translateY(-2px); }}
-        .info-pill {{ font-size: 0.8rem; font-weight: 600; }}
+        .primary-highlight {{ background: linear-gradient(135deg, #1E3A8A 0%, #0F172A 100%); border: 2px solid #3B82F6; padding: 20px; border-radius: 12px; margin-bottom: 22px; }}
+        .primary-highlight h2 {{ font-size: 1.05rem; color: #93C5FD; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }}
+        .primary-ip-box {{ display: flex; justify-content: space-between; align-items: center; background: #0B1120; padding: 14px 18px; border-radius: 8px; border: 1px solid #2563EB; flex-wrap: wrap; gap: 10px; }}
+        .primary-ip-val {{ font-family: monospace; font-size: 1.8rem; color: #38BDF8; font-weight: bold; }}
+        
+        .services-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-bottom: 24px; }}
+        .service-card {{ background: #0F172A; border: 1px solid #334155; padding: 16px; border-radius: 10px; display: flex; flex-direction: column; justify-content: space-between; }}
+        .service-title {{ font-size: 1.05rem; font-weight: 600; color: #F1F5F9; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }}
+        .service-desc {{ font-size: 0.85rem; color: #94A3B8; margin-bottom: 12px; }}
+        .service-btn {{ display: block; text-align: center; background: #2563EB; color: #FFF; padding: 9px 14px; border-radius: 6px; text-decoration: none; font-size: 0.85rem; font-weight: 600; transition: background 0.2s; border: none; cursor: pointer; }}
+        .service-btn:hover {{ background: #1D4ED8; }}
+        .service-btn.disabled {{ background: #475569; cursor: not-allowed; opacity: 0.7; }}
+
+        .ip-card {{ background: #0F172A; border: 1px solid #334155; padding: 18px; border-radius: 12px; margin-bottom: 22px; }}
+        .ip-row {{ background: #1E293B; border: 1px solid #334155; padding: 12px 16px; border-radius: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }}
+        .ip-row.ip-primary {{ border-color: #3B82F6; background: #172554; }}
+        .ip-addr {{ font-family: monospace; font-size: 1.15rem; color: #38BDF8; margin-right: 10px; }}
+        .ip-tag {{ font-size: 0.8rem; color: #94A3B8; }}
+        
+        .btn-copy {{ background: #334155; color: #F1F5F9; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.82rem; font-weight: 600; transition: all 0.2s; }}
+        .btn-copy:hover {{ background: #2563EB; color: #FFF; }}
+
+        .firewall-box {{ background: #1E293B; border: 1px dashed #F59E0B; padding: 16px; border-radius: 10px; margin-bottom: 20px; }}
+        .firewall-box h4 {{ color: #FBBF24; font-size: 0.92rem; margin-bottom: 6px; }}
+        .firewall-box p {{ font-size: 0.85rem; color: #CBD5E1; margin-bottom: 8px; line-height: 1.4; }}
+        .cmd-snippet {{ background: #0F172A; padding: 10px 14px; border-radius: 6px; font-family: monospace; font-size: 0.82rem; color: #38BDF8; display: flex; justify-content: space-between; align-items: center; overflow-x: auto; }}
+
+        #stack-progress-container {{ display: none; background: #1E293B; border: 1px solid #3B82F6; padding: 14px; border-radius: 8px; margin-bottom: 20px; }}
+        .progress-bar-bg {{ background: #0F172A; border-radius: 999px; height: 12px; overflow: hidden; margin-top: 8px; }}
+        .progress-bar-fill {{ background: #10B981; height: 100%; width: 0%; transition: width 0.3s; }}
     </style>
 </head>
 <body>
@@ -271,98 +384,189 @@ async def dashboard() -> str:
         <div class="card">
             <div class="header">
                 <h1>📡 RedLab Tester - Servidor Central</h1>
-                {status_badge}
+                {iperf_badge}
             </div>
-            <p class="subtitle">Este equipo está funcionando como <strong>receptor central de mediciones</strong>. El motor iperf3 está listo en el puerto 5201 para medir ancho de banda y latencia.</p>
+            <p class="subtitle">Este equipo opera como servidor central de mediciones (iPerf3), almacenamiento de telemetría (InfluxDB v2 nativo) y paneles de control (Grafana nativo).</p>
 
-            <div class="instruction-box">
-                <h2>🚀 ¿Cómo realizar una prueba de red?</h2>
-                <p>Las pruebas <strong>no se inician desde esta web</strong>, sino desde los equipos o switches que deseas medir:</p>
-                <ol class="steps">
-                    <li>Abre el programa <strong>SondaCliente.exe</strong> (o ejecuta <code>python cliente.py</code>) en el equipo cliente.</li>
-                    <li>En el campo <strong>"IP del Servidor"</strong>, introduce una de las direcciones IP que aparecen abajo.</li>
-                    <li>Pulsa el botón azul <strong>"Iniciar Medición"</strong> en la interfaz de SondaCliente.</li>
-                    <li>Verás el ancho de banda (Mbps) y las retransmisiones en tiempo real.</li>
-                </ol>
+            <!-- IP RECOMENDADA -->
+            <div class="primary-highlight">
+                <h2>⭐ Introduce esta IP en SondaCliente.exe</h2>
+                <div class="primary-ip-box">
+                    <div>
+                        <div class="primary-ip-val" id="primary-ip">{primary_ip}</div>
+                        <div style="font-size: 0.85rem; color: #93C5FD; margin-top: 4px;">IP de Red Local detectada para clientes de la misma red</div>
+                    </div>
+                    <button onclick="copyText('{primary_ip}', this)" class="btn-copy" style="background:#2563EB; color:#fff; font-size:0.95rem; padding:10px 18px;">📋 Copiar IP</button>
+                </div>
             </div>
-            
+
+            <!-- PROGRESO DESCARGA STACK -->
+            <div id="stack-progress-container">
+                <div style="display:flex; justify-content:space-between; font-size:0.85rem;">
+                    <span id="stack-status-text">Descargando Stack Nativo (InfluxDB + Grafana)...</span>
+                    <strong id="stack-percent-text">0%</strong>
+                </div>
+                <div class="progress-bar-bg">
+                    <div id="stack-progress-fill" class="progress-bar-fill"></div>
+                </div>
+            </div>
+
+            <!-- GRID SERVICIOS -->
+            <h3 style="color:#CBD5E1; font-size:1.05rem; margin-bottom:12px;">Servicios Integrados</h3>
+            <div class="services-grid">
+                <!-- iPerf3 -->
+                <div class="service-card">
+                    <div>
+                        <div class="service-title">
+                            <span>🚀 iPerf3 Server</span>
+                            {iperf_badge}
+                        </div>
+                        <p class="service-desc">Escuchando en puerto <strong>5201</strong> para pruebas de ancho de banda y pérdida de paquetes.</p>
+                    </div>
+                    <span style="font-size:0.8rem; color:#64748B;">Listo para conexiones de clientes</span>
+                </div>
+
+                <!-- InfluxDB -->
+                <div class="service-card">
+                    <div>
+                        <div class="service-title">
+                            <span>🗄️ InfluxDB v2</span>
+                            {influx_badge}
+                        </div>
+                        <p class="service-desc">Puerto <strong>{INFLUX_PORT}</strong>. Base de datos de series temporales para almacenar telemetría de red.</p>
+                    </div>
+                    <a href="http://localhost:{INFLUX_PORT}" target="_blank" class="service-btn" id="btn-influx">Abrir InfluxDB (:4000)</a>
+                </div>
+
+                <!-- Grafana -->
+                <div class="service-card">
+                    <div>
+                        <div class="service-title">
+                            <span>📊 Grafana OSS</span>
+                            {grafana_badge}
+                        </div>
+                        <p class="service-desc">Puerto <strong>{GRAFANA_PORT}</strong>. Visualización interactiva y dashboards en tiempo real.</p>
+                    </div>
+                    <a href="http://localhost:{GRAFANA_PORT}" target="_blank" class="service-btn" id="btn-grafana">Abrir Grafana (:7500)</a>
+                </div>
+            </div>
+
+            <!-- TODAS LAS IPS DISPONIBLES -->
             <div class="ip-card">
-                <h3 style="color:#60A5FA; font-size:0.95rem; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">
-                    IP(s) de este Servidor (Copia una para pegarla en SondaCliente):
+                <h3 style="color:#60A5FA; font-size:0.95rem; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:12px;">
+                    Todas las IPs detectadas en este equipo:
                 </h3>
                 {ips_html}
             </div>
 
-            <div style="background:#1E293B; border:1px dashed #F59E0B; padding:16px; border-radius:10px; margin-bottom:20px;">
-                <h4 style="color:#FBBF24; font-size:0.9rem; margin-bottom:6px;">⚠️ ¿El cliente da error de conexión o timeout desde otro PC?</h4>
-                <p style="font-size:0.85rem; color:#CBD5E1; margin-bottom:10px;">
-                    El Firewall de Windows suele bloquear el puerto 5201 por defecto. Si el cliente no puede conectar, abre <strong>PowerShell como Administrador</strong> en este servidor y ejecuta:
-                </p>
-                <div style="background:#0F172A; padding:10px 14px; border-radius:6px; font-family:monospace; font-size:0.85rem; color:#38BDF8; display:flex; justify-content:space-between; align-items:center;">
-                    <span>netsh advfirewall firewall add rule name="RedLab iperf3 TCP 5201" dir=in action=allow protocol=TCP localport=5201</span>
-                    <button onclick="navigator.clipboard.writeText('netsh advfirewall firewall add rule name=\"RedLab iperf3 TCP 5201\" dir=in action=allow protocol=TCP localport=5201'); this.innerText='¡Copiado!'; setTimeout(()=>this.innerText='Copiar Regla', 1500);" style="background:#D97706; color:#fff; border:none; padding:4px 12px; border-radius:4px; cursor:pointer; font-size:0.8rem; margin-left:10px;">Copiar Regla</button>
+            <!-- FIREWALL HELP -->
+            <div class="firewall-box">
+                <h4>⚠️ ¿El cliente da timeout o error de conexión desde otro PC?</h4>
+                <p>El Firewall de Windows suele bloquear puertos entrantes por defecto. Si la sonda no puede conectar, abre <strong>PowerShell como Administrador</strong> en este equipo y ejecuta:</p>
+                <div class="cmd-snippet">
+                    <span>netsh advfirewall firewall add rule name="RedLab Suite" dir=in action=allow protocol=TCP localport=5201,4000,7500,8000</span>
+                    <button onclick="copyText('netsh advfirewall firewall add rule name=&quot;RedLab Suite&quot; dir=in action=allow protocol=TCP localport=5201,4000,7500,8000', this)" class="btn-copy">Copiar</button>
                 </div>
             </div>
 
-            <h3 style="color:#CBD5E1; font-size:1rem; margin-top:20px; margin-bottom:8px;">Estado de Servicios Asociados</h3>
-            <div class="links-grid">
-                <a href="http://localhost:{GRAFANA_PORT}" target="_blank" class="link-btn">
-                    <span>📊 Grafana</span>
-                    <span class="info-pill">{grafana_status_text}</span>
-                </a>
-                <a href="http://localhost:{INFLUX_PORT}" target="_blank" class="link-btn">
-                    <span>🗄️ InfluxDB</span>
-                    <span class="info-pill">{influx_status_text}</span>
-                </a>
-                <a href="/docs" target="_blank" class="link-btn">
-                    <span>📖 API Docs (Swagger)</span>
-                    <span class="info-pill" style="color:#38BDF8;">/docs</span>
-                </a>
-                <a href="/status" target="_blank" class="link-btn">
-                    <span>🔍 Estado JSON</span>
-                    <span class="info-pill" style="color:#38BDF8;">/status</span>
-                </a>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:20px; font-size:0.85rem; color:#64748B;">
+                <span>RedLab Tester Servidor v{APP_VERSION}</span>
+                <div>
+                    <a href="/docs" target="_blank" style="color:#38BDF8; margin-right:16px; text-decoration:none;">Documentación API</a>
+                    <a href="/status" target="_blank" style="color:#38BDF8; text-decoration:none;">Diagnóstico JSON</a>
+                </div>
             </div>
         </div>
     </div>
+
+    <script>
+        function copyText(text, btn) {{
+            navigator.clipboard.writeText(text);
+            const original = btn.innerText;
+            btn.innerText = '¡Copiado!';
+            setTimeout(() => {{ btn.innerText = original; }}, 1500);
+        }}
+
+        // Monitoreo dinámico del estado del stack (InfluxDB y Grafana nativos)
+        async function checkStackStatus() {{
+            try {{
+                const res = await fetch('/api/stack/status');
+                const data = await res.json();
+                
+                const progContainer = document.getElementById('stack-progress-container');
+                const progText = document.getElementById('stack-status-text');
+                const progPct = document.getElementById('stack-percent-text');
+                const progFill = document.getElementById('stack-progress-fill');
+
+                const isDownloading = (data.download_status.influxdb === 'downloading' || 
+                                       data.download_status.grafana === 'downloading' ||
+                                       data.download_status.influxdb === 'extracting' ||
+                                       data.download_status.grafana === 'extracting');
+
+                if (isDownloading) {{
+                    progContainer.style.display = 'block';
+                    const maxPct = Math.max(data.download_progress.influxdb || 0, data.download_progress.grafana || 0);
+                    progPct.innerText = Math.round(maxPct) + '%';
+                    progFill.style.width = maxPct + '%';
+                    progText.innerText = 'Instalando componentes nativos InfluxDB y Grafana... (' + Math.round(maxPct) + '%)';
+                }} else if (data.influx && data.grafana) {{
+                    progContainer.style.display = 'none';
+                }}
+            }} catch(e) {{
+                console.error(e);
+            }}
+        }}
+
+        setInterval(checkStackStatus, 3000);
+        checkStackStatus();
+    </script>
 </body>
 </html>
 """
 
 
 if __name__ == "__main__":
-    local_ips = get_local_ips()
+    ips_info = get_classified_ips()
+    primary = ips_info["primary"]
+
+    # Asegurar regla de firewall e iniciar servicios
+    configure_windows_firewall()
     iperf_ready = ensure_local_iperf_server()
+
+    # Iniciar stack nativo InfluxDB + Grafana
+    if stack_manager.is_stack_installed():
+        stack_manager.setup_and_start_all()
+    else:
+        stack_manager.install_native_stack_async()
+
     influx_ready = is_port_open("127.0.0.1", INFLUX_PORT)
     grafana_ready = is_port_open("127.0.0.1", GRAFANA_PORT)
 
-    print("=" * 64)
-    print("           RedLab Tester - Servidor Central")
-    print("=" * 64)
+    print("=" * 66)
+    print("                 RedLab Tester - Servidor Central")
+    print("=" * 66)
     print(f"Versión: {APP_VERSION}")
     _upd = check_for_update()
     if _upd:
         print(f"[ACTUALIZACIÓN] Nueva versión {_upd['version']}: {_upd['url']}")
-    if iperf_ready:
-        print("[OK] Receptor iperf3: ACTIVO en puerto 5201 (Listo para pruebas)")
-    else:
-        print("[ADVERTENCIA] No se pudo levantar iperf3 en el puerto 5201.")
 
-    print(f"[OK] Panel Web:        http://localhost:8000")
-    if influx_ready and grafana_ready:
-        print(f"[OK] Docker Stack:     InfluxDB (:{INFLUX_PORT}) y Grafana (:{GRAFANA_PORT}) ONLINE")
-    else:
-        print("[INFO] Docker Stack:    Desconectado (Opcional: 'docker compose up -d')")
-
-    print("-" * 64)
-    print("Dirección(es) IP para configurar en SondaCliente:")
-    for ip in local_ips:
-        print(f"  -> {ip}")
-    print("-" * 64)
-    print(">> Para ejecutar pruebas de red, abre 'SondaCliente.exe'")
-    print("   o ejecuta: python cliente.py")
-    print("[!] Si conectas desde otro equipo y da timeout, abre puerto en Firewall:")
-    print('    netsh advfirewall firewall add rule name="RedLab iperf3 TCP 5201" dir=in action=allow protocol=TCP localport=5201')
-    print("=" * 64)
+    print("-" * 66)
+    print(f" ⭐ IP RECOMENDADA PARA SondaCliente: {primary}")
+    print(f"    (Introduce '{primary}' en el campo IP del cliente)")
+    print("-" * 66)
+    print("ESTADO DE SERVICIOS NATIVOS:")
+    print(f" [●] Servidor iPerf3 : Puerto 5201 {'[OK - ACTIVO]' if iperf_ready else '[INACTIVO]'}")
+    print(f" [●] InfluxDB v2     : http://localhost:{INFLUX_PORT} {'[OK]' if influx_ready else '[Iniciando/Descargando...]'}")
+    print(f" [●] Grafana         : http://localhost:{GRAFANA_PORT} {'[OK]' if grafana_ready else '[Iniciando/Descargando...]'}")
+    print(f" [●] Panel Web       : http://localhost:8000")
+    print("-" * 66)
+    print("Todas las interfaces detectadas en este servidor:")
+    for item in ips_info["all"]:
+        mark = "⭐ (Recomendada)" if item["is_primary"] else f"({item['tag']})"
+        print(f"  -> {item['ip']:<16} {mark}")
+    print("-" * 66)
+    print(">> Si el cliente da timeout desde otro PC, ejecuta como Administrador:")
+    print('   netsh advfirewall firewall add rule name="RedLab Suite" dir=in action=allow protocol=TCP localport=5201,4000,7500,8000')
+    print("=" * 66)
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
