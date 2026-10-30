@@ -14,26 +14,28 @@ services:
     volumes:
       - influxdb_data:/var/lib/influxdb2
       - influxdb_config:/etc/influxdb2
-    healthcheck:
-      test: ["CMD", "influx", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    restart: unless-stopped
 
   grafana:
     image: grafana/grafana:latest
     container_name: redlab-grafana
     depends_on:
-      influxdb:
-        condition: service_healthy
+      - influxdb
     ports:
       - "7500:3000"
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin_change_me
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: unless-stopped
 
   iperf3:
     image: networkstatic/iperf3
@@ -43,6 +45,8 @@ services:
       - "5201:5201/tcp"
       - "5201:5201/udp"
     restart: unless-stopped
+    profiles:
+      - standalone
 
 volumes:
   influxdb_data:

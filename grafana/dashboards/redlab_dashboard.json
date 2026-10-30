@@ -1,0 +1,48 @@
+{
+  "title": "RedLab Tester - Métricas de Ancho de Banda",
+  "tags": ["redlab", "iperf3"],
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "refresh": "5s",
+  "panels": [
+    {
+      "title": "Ancho de Banda (Mbps) por Switch / Equipo",
+      "type": "timeseries",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 0},
+      "datasource": {"type": "influxdb", "uid": "redlab-influxdb"},
+      "targets": [
+        {
+          "query": "from(bucket: \"iperf_stats\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"iperf_tcp\")\n  |> filter(fn: (r) => r[\"_field\"] == \"bandwidth_mbps\")\n  |> yield(name: \"bandwidth\")",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Mbits",
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth"}
+        }
+      }
+    },
+    {
+      "title": "Retransmisiones TCP",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 9},
+      "datasource": {"type": "influxdb", "uid": "redlab-influxdb"},
+      "targets": [
+        {
+          "query": "from(bucket: \"iperf_stats\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"iperf_tcp\")\n  |> filter(fn: (r) => r[\"_field\"] == \"tcp_retransmits\")\n  |> yield(name: \"retransmits\")",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {"mode": "fixed", "fixedColor": "red"},
+          "custom": {"drawStyle": "bars"}
+        }
+      }
+    }
+  ]
+}
+

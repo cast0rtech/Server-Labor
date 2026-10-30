@@ -366,6 +366,35 @@ async def api_iperf_stop() -> dict[str, Any]:
     return {"status": "ok", "port": 5201, "active": is_port_open("127.0.0.1", 5201)}
 
 
+@app.post("/api/docker/start")
+async def api_docker_start() -> dict[str, Any]:
+    """Intenta levantar los contenedores de Docker (InfluxDB y Grafana)."""
+    try:
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        test = subprocess.run(["docker", "info"], capture_output=True, timeout=6, creationflags=creationflags)
+        if test.returncode != 0:
+            return {
+                "status": "error",
+                "message": "Docker Desktop no está en ejecución. Por favor abre Docker Desktop en Windows y espera a que inicie el motor.",
+            }
+
+        app_dir = Path(__file__).resolve().parent
+        res = subprocess.run(
+            ["docker", "compose", "up", "-d", "influxdb", "grafana"],
+            capture_output=True,
+            text=True,
+            cwd=str(app_dir),
+            timeout=120,
+            creationflags=creationflags,
+        )
+        if res.returncode == 0:
+            return {"status": "ok", "message": "Contenedores Docker iniciados correctamente en puertos 4000 y 7500."}
+        else:
+            return {"status": "error", "message": f"Docker error: {res.stderr.strip() or res.stdout.strip()}"}
+    except Exception as e:
+        return {"status": "error", "message": f"Error al ejecutar docker compose: {e}"}
+
+
 @app.get("/api/info")
 async def info() -> dict:
     """Información completa de diagnóstico del servidor."""
@@ -529,7 +558,7 @@ async def dashboard() -> str:
                     <div>
                         <div class="service-title">
                             <span>🗄️ InfluxDB v2</span>
-                            {influx_badge}
+                            <span id="badge-influx">{influx_badge}</span>
                         </div>
                         <p class="service-desc">Puerto <strong>{INFLUX_PORT}</strong>. Base de datos de series temporales para almacenar telemetría de red.</p>
                     </div>
@@ -541,11 +570,23 @@ async def dashboard() -> str:
                     <div>
                         <div class="service-title">
                             <span>📊 Grafana OSS</span>
-                            {grafana_badge}
+                            <span id="badge-grafana">{grafana_badge}</span>
                         </div>
                         <p class="service-desc">Puerto <strong>{GRAFANA_PORT}</strong>. Visualización interactiva y dashboards en tiempo real.</p>
                     </div>
                     <a href="http://localhost:{GRAFANA_PORT}" target="_blank" class="service-btn" id="btn-grafana">Abrir Grafana (:7500)</a>
+                </div>
+            </div>
+
+            <!-- ACCIONES PARA INICIAR EL STACK DE DATOS -->
+            <div style="background:#1E293B; border:1px solid #334155; padding:16px 20px; border-radius:10px; margin-bottom:22px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                <div>
+                    <strong style="color:#F1F5F9; font-size:0.95rem;">¿InfluxDB o Grafana están inactivos?</strong>
+                    <p style="font-size:0.82rem; color:#94A3B8; margin-top:2px;">Elige cómo quieres iniciarlos (vía Docker o nativo independiente):</p>
+                </div>
+                <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                    <button onclick="startDockerStack(this)" class="btn-copy" style="background:#0284C7; color:#FFF; padding:9px 16px;">🐳 Iniciar con Docker</button>
+                    <button onclick="startNativeStack(this)" class="btn-copy" style="background:#10B981; color:#FFF; padding:9px 16px;">⚡ Iniciar Stack Nativo</button>
                 </div>
             </div>
 
@@ -610,6 +651,40 @@ async def dashboard() -> str:
             }}
         }}
 
+        async function startDockerStack(btn) {{
+            const originalText = btn.innerText;
+            btn.disabled = true;
+            btn.innerText = '⏳ Iniciando Docker...';
+            try {{
+                const res = await fetch('/api/docker/start', {{ method: 'POST' }});
+                const data = await res.json();
+                alert(data.message);
+                checkStackStatus();
+            }} catch(e) {{
+                alert('Error al comunicar con Docker: ' + e);
+            }} finally {{
+                btn.innerText = originalText;
+                btn.disabled = false;
+            }}
+        }}
+
+        async function startNativeStack(btn) {{
+            const originalText = btn.innerText;
+            btn.disabled = true;
+            btn.innerText = '⏳ Iniciando Nativo...';
+            try {{
+                const res = await fetch('/api/stack/install', {{ method: 'POST' }});
+                const data = await res.json();
+                alert(data.message || 'Instalación de stack nativo iniciada.');
+                checkStackStatus();
+            }} catch(e) {{
+                alert('Error al iniciar stack nativo: ' + e);
+            }} finally {{
+                btn.innerText = originalText;
+                btn.disabled = false;
+            }}
+        }}
+
         // Monitoreo dinámico del estado del stack (iPerf3, InfluxDB y Grafana)
         async function checkStackStatus() {{
             try {{
@@ -633,6 +708,16 @@ async def dashboard() -> str:
                             btnIperf.innerText = '▶ Activar Puerto 5201 Ahora';
                         }}
                     }}
+                }}
+
+                // Actualizar Badges InfluxDB y Grafana
+                const badgeInflux = document.getElementById('badge-influx');
+                if (badgeInflux) {{
+                    badgeInflux.innerHTML = data.influx ? '<span class="badge badge-success">● ACTIVO (:4000)</span>' : '<span class="badge badge-warning">○ Inactivo (:4000)</span>';
+                }}
+                const badgeGrafana = document.getElementById('badge-grafana');
+                if (badgeGrafana) {{
+                    badgeGrafana.innerHTML = data.grafana ? '<span class="badge badge-success">● ACTIVO (:7500)</span>' : '<span class="badge badge-warning">○ Inactivo (:7500)</span>';
                 }}
 
                 const progContainer = document.getElementById('stack-progress-container');
