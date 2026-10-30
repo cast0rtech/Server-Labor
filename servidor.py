@@ -125,8 +125,12 @@ def iperf_watchdog_loop() -> None:
             restart_local_iperf_server(force=True)
 
 
+user_selected_ip: Optional[str] = None
+
+
 def get_classified_ips() -> dict[str, Any]:
     """Obtiene y clasifica las IPs locales en Primaria (LAN) y Secundarias (VPN/WSL/Virtuales)."""
+    global user_selected_ip
     ips: set[str] = set()
     primary_ip = ""
 
@@ -153,25 +157,31 @@ def get_classified_ips() -> dict[str, Any]:
     if not primary_ip:
         primary_ip = next(iter(ips))
 
+    # Si el usuario ha seleccionado una IP específica, esa se convierte en la prioritaria
+    if user_selected_ip and user_selected_ip in ips:
+        primary_ip = user_selected_ip
+
     classified: list[dict[str, str]] = []
     for ip in sorted(list(ips)):
         is_primary = (ip == primary_ip)
         notes = []
         if is_primary:
-            notes.append("⭐ Red Local (LAN Recomendada)")
+            notes.append("⭐ Seleccionada para Pruebas")
         if ip.startswith("192.168.56."):
             notes.append("VirtualBox Host-Only")
         elif ip.startswith("172.2") or ip.startswith("172.1") or ip.startswith("172.3"):
             notes.append("WSL / Hyper-V Virtual")
         elif ip.startswith("10.") and not is_primary:
             notes.append("VPN / Red Corporativa")
+        elif (ip.startswith("192.168.") or ip.startswith("10.")) and not is_primary:
+            notes.append("Red Local (LAN)")
 
         tag = " - ".join(notes) if notes else "Interfaz de red"
         classified.append({"ip": ip, "is_primary": is_primary, "tag": tag})
 
     # Ordenar poniendo la primaria primero
     classified.sort(key=lambda x: (not x["is_primary"], x["ip"]))
-    return {"primary": primary_ip, "all": classified}
+    return {"primary": primary_ip, "selected": user_selected_ip or primary_ip, "all": classified}
 
 
 def find_iperf3_binary() -> Optional[Path]:
@@ -395,6 +405,22 @@ async def api_docker_start() -> dict[str, Any]:
         return {"status": "error", "message": f"Error al ejecutar docker compose: {e}"}
 
 
+@app.post("/api/server/select-ip")
+async def api_select_ip(payload: dict) -> dict[str, Any]:
+    """Establece la IP seleccionada por el usuario como la IP preferente del servidor."""
+    global user_selected_ip
+    ip = str(payload.get("ip", "")).strip()
+    if ip:
+        user_selected_ip = ip
+    info = get_classified_ips()
+    return {
+        "status": "ok",
+        "selected_ip": info["selected"],
+        "primary_ip": info["primary"],
+        "message": f"IP preferente actualizada a {info['selected']}",
+    }
+
+
 @app.get("/api/info")
 async def info() -> dict:
     """Información completa de diagnóstico del servidor."""
@@ -438,13 +464,23 @@ async def dashboard() -> str:
         else '<span class="badge badge-warning">○ En espera / Descargando</span>'
     )
 
+    ip_selector_pills = "".join(
+        f'<button onclick="selectServerIp(\'{item["ip"]}\')" class="btn-copy" style="background:{"#2563EB" if item["is_primary"] else "#1E293B"}; color:#FFF; margin:2px; padding:5px 12px; border:1px solid {"#60A5FA" if item["is_primary"] else "#475569"}; font-size:0.8rem;">'
+        f'{"● " if item["is_primary"] else ""}{item["ip"]} ({item["tag"].split(" - ")[0]})'
+        f'</button>'
+        for item in info_ips["all"]
+    )
+
     ips_html = "".join(
         f'<div class="ip-row {"ip-primary" if item["is_primary"] else ""}">'
         f'  <div>'
         f'    <strong class="ip-addr">{item["ip"]}</strong>'
         f'    <span class="ip-tag">{item["tag"]}</span>'
         f'  </div>'
-        f'  <button onclick="copyText(\'{item["ip"]}\', this)" class="btn-copy">Copiar IP</button>'
+        f'  <div style="display:flex; gap:6px;">'
+        f'    <button onclick="selectServerIp(\'{item["ip"]}\')" class="btn-copy" style="background:#2563EB;">Seleccionar</button>'
+        f'    <button onclick="copyText(\'{item["ip"]}\', this)" class="btn-copy">Copiar</button>'
+        f'  </div>'
         f'</div>'
         for item in info_ips["all"]
     )
@@ -510,15 +546,26 @@ async def dashboard() -> str:
             </div>
             <p class="subtitle">Este equipo opera como servidor central de mediciones (iPerf3), almacenamiento de telemetría (InfluxDB v2 nativo) y paneles de control (Grafana nativo).</p>
 
-            <!-- IP RECOMENDADA -->
+            <!-- IP RECOMENDADA / SELECCIONADA -->
             <div class="primary-highlight">
-                <h2>⭐ Introduce esta IP en SondaCliente.exe</h2>
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+                    <h2>⭐ IP ACTIVA PARA SONDA CLIENTE</h2>
+                    <span style="font-size:0.8rem; color:#93C5FD;">(Haz clic en cualquier IP abajo para cambiar la IP de pruebas)</span>
+                </div>
                 <div class="primary-ip-box">
                     <div>
                         <div class="primary-ip-val" id="primary-ip">{primary_ip}</div>
-                        <div style="font-size: 0.85rem; color: #93C5FD; margin-top: 4px;">IP de Red Local detectada para clientes de la misma red</div>
+                        <div style="font-size: 0.85rem; color: #93C5FD; margin-top: 4px;">IP actual seleccionada para que las sondas cliente ejecuten la medición</div>
                     </div>
-                    <button onclick="copyText('{primary_ip}', this)" class="btn-copy" style="background:#2563EB; color:#fff; font-size:0.95rem; padding:10px 18px;">📋 Copiar IP</button>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button onclick="copyText('{primary_ip}', this)" class="btn-copy" style="background:#2563EB; color:#fff; font-size:0.95rem; padding:10px 18px;">📋 Copiar IP</button>
+                        <button onclick="copyClientEnv('{primary_ip}', this)" class="btn-copy" style="background:#10B981; color:#fff; font-size:0.9rem; padding:10px 14px;">💾 Copiar Config .env</button>
+                    </div>
+                </div>
+
+                <div style="margin-top:12px; padding-top:10px; border-top:1px solid rgba(59,130,246,0.3); display:flex; align-items:center; flex-wrap:wrap; gap:6px;">
+                    <span style="font-size:0.82rem; color:#CBD5E1; margin-right:4px;">Cambiar IP de pruebas:</span>
+                    {ip_selector_pills}
                 </div>
             </div>
 
@@ -624,6 +671,27 @@ async def dashboard() -> str:
             const original = btn.innerText;
             btn.innerText = '¡Copiado!';
             setTimeout(() => {{ btn.innerText = original; }}, 1500);
+        }}
+
+        async function selectServerIp(ip) {{
+            try {{
+                const res = await fetch('/api/server/select-ip', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ ip: ip }})
+                }});
+                const data = await res.json();
+                if (data.status === 'ok') {{
+                    window.location.reload();
+                }}
+            }} catch(e) {{
+                alert('Error al seleccionar IP: ' + e);
+            }}
+        }}
+
+        function copyClientEnv(ip, btn) {{
+            const text = "IPERF_SERVER_IP=" + ip + "\\nIPERF_PORT=5201\\nINFLUX_URL=http://" + ip + ":4000\\nINFLUX_ORG=red_lab\\nINFLUX_BUCKET=iperf_stats\\nINFLUX_TOKEN=lab_token_secure\\n";
+            copyText(text, btn);
         }}
 
         async function restartIperf(btn) {{

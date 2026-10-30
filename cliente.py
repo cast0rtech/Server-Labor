@@ -347,6 +347,7 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
     retransmit_result_var = tk.StringVar(value="--")
     influx_status_var = tk.StringVar(value="En espera")
     status_msg_var = tk.StringVar(value="Listo para iniciar prueba.")
+    ip_diag_var = tk.StringVar(value="Introduce la IP o pulsa '🔍 Detectar IPs del Servidor'.")
 
     stop_event: Optional[threading.Event] = None
     is_running_lock = threading.Lock()
@@ -406,17 +407,149 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
     )
     card_server.pack(fill=tk.X, pady=(0, 10))
 
-    # Campo IP
+    # Funciones de soporte para selección y prueba de IPs
+    def _extract_clean_ip(raw: str) -> str:
+        s = raw.strip()
+        return s.split()[0] if s else ""
+
+    def _quick_test_ip(ip_to_test: str):
+        clean_ip = _extract_clean_ip(ip_to_test)
+        if not clean_ip:
+            return
+        root.after(0, lambda: ip_diag_var.set(f"Probando conexión con {clean_ip}..."))
+        try:
+            target_port = int(port_var.get().strip() or "5201")
+        except ValueError:
+            target_port = DEFAULT_PORT
+
+        iperf_ok, diag_err = test_tcp_connectivity(clean_ip, target_port, timeout=2.0)
+        web_ok, _ = test_tcp_connectivity(clean_ip, 8000, timeout=1.5)
+        inf_ok, _ = test_tcp_connectivity(clean_ip, 4000, timeout=1.5)
+
+        if iperf_ok:
+            msg = f"● Conectado a {clean_ip}:{target_port} OK (iPerf3 listo, InfluxDB: {'OK' if inf_ok else 'inactivo'}, Web: {'OK' if web_ok else 'inactivo'})"
+            color = "#10B981"
+        else:
+            msg = f"▲ Sin respuesta en {clean_ip}:{target_port} ({diag_err}). Prueba otra IP del servidor."
+            color = "#EF4444"
+
+        root.after(0, lambda m=msg, c=color: (ip_diag_var.set(m), ip_diag_label.config(fg=c)))
+
+    def on_ip_selected(event=None):
+        val = server_ip_var.get()
+        clean = _extract_clean_ip(val)
+        if clean:
+            server_ip_var.set(clean)
+            influx_url_var.set(f"http://{clean}:4000")
+            log(f"IP seleccionada para pruebas: {clean}")
+            threading.Thread(target=_quick_test_ip, args=(clean,), daemon=True).start()
+
+    def on_test_connection():
+        val = _extract_clean_ip(server_ip_var.get())
+        if not val:
+            messagebox.showwarning("Falta IP", "Introduce o selecciona primero una dirección IP.")
+            return
+        threading.Thread(target=_quick_test_ip, args=(val,), daemon=True).start()
+
+    def on_detect_server_ips():
+        current_host = _extract_clean_ip(server_ip_var.get()) or "localhost"
+        btn_detect.config(state=tk.DISABLED, text="🔍 Consultando...")
+        log(f"Consultando interfaces disponibles en el servidor http://{current_host}:8000/api/info...")
+
+        def _worker():
+            try:
+                import json
+                import urllib.request
+                url = f"http://{current_host}:8000/api/info"
+                req = urllib.request.Request(url, headers={"User-Agent": "RedLab-Client/1.0"})
+                with urllib.request.urlopen(req, timeout=3.5) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        all_ips = data.get("all_ips", [])
+                        primary = data.get("primary_ip", "")
+
+                        combo_items = []
+                        for it in all_ips:
+                            ip_val = it.get("ip", "")
+                            tag_val = it.get("tag", "")
+                            combo_items.append(f"{ip_val}  ({tag_val})")
+
+                        def _apply():
+                            if combo_items:
+                                ip_combo["values"] = combo_items
+                                log(f"Se detectaron {len(combo_items)} IPs en el servidor.")
+                                target = primary if primary else _extract_clean_ip(combo_items[0])
+                                server_ip_var.set(target)
+                                influx_url_var.set(f"http://{target}:4000")
+                                ip_diag_var.set(f"IPs obtenidas. Selecciona la deseada en el desplegable.")
+                                ip_diag_label.config(fg="#2563EB")
+                                threading.Thread(target=_quick_test_ip, args=(target,), daemon=True).start()
+                            else:
+                                ip_diag_var.set("El servidor respondió pero no devolvió interfaces.")
+                                ip_diag_label.config(fg="#F59E0B")
+
+                        root.after(0, _apply)
+                        return
+            except Exception as e:
+                def _fail():
+                    log(f"Aviso: No se pudo contactar con {current_host}:8000 ({e}).")
+                    ip_diag_var.set(f"Sin respuesta en {current_host}:8000. Introduce la IP manualmente.")
+                    ip_diag_label.config(fg="#EF4444")
+                root.after(0, _fail)
+            finally:
+                root.after(0, lambda: btn_detect.config(state=tk.NORMAL, text="🔍 Detectar IPs"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # Fila superior de IP con botones de detección y prueba
+    ip_top_frame = tk.Frame(card_server, bg=BG_CARD)
+    ip_top_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(4, 2))
+
     tk.Label(
-        card_server,
+        ip_top_frame,
         text="IP o Hostname del Servidor:",
         font=("Segoe UI", 9, "bold"),
         bg=BG_CARD,
         fg=TEXT_MAIN,
-    ).grid(row=0, column=0, sticky="w", pady=(4, 2))
+    ).pack(side=tk.LEFT)
 
-    ip_entry = ttk.Entry(card_server, textvariable=server_ip_var, font=("Segoe UI", 10))
-    ip_entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+    btn_test_conn = tk.Button(
+        ip_top_frame,
+        text="⚡ Probar Conexión",
+        font=("Segoe UI", 7, "bold"),
+        bg="#DCFCE7",
+        fg="#166534",
+        relief=tk.FLAT,
+        padx=6,
+        pady=1,
+        cursor="hand2",
+        command=on_test_connection,
+    )
+    btn_test_conn.pack(side=tk.RIGHT, padx=(4, 0))
+
+    btn_detect = tk.Button(
+        ip_top_frame,
+        text="🔍 Detectar IPs",
+        font=("Segoe UI", 7, "bold"),
+        bg="#E0E7FF",
+        fg="#1E40AF",
+        relief=tk.FLAT,
+        padx=6,
+        pady=1,
+        cursor="hand2",
+        command=on_detect_server_ips,
+    )
+    btn_detect.pack(side=tk.RIGHT)
+
+    # Campo IP con Combobox desplegable
+    ip_combo = ttk.Combobox(
+        card_server,
+        textvariable=server_ip_var,
+        font=("Segoe UI", 10),
+    )
+    ip_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+    ip_combo.bind("<<ComboboxSelected>>", on_ip_selected)
+    ip_combo.bind("<Return>", on_ip_selected)
 
     # Puerto
     tk.Label(
@@ -428,7 +561,18 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
     ).grid(row=0, column=2, sticky="w", padx=(10, 0), pady=(4, 2))
 
     port_entry = ttk.Entry(card_server, textvariable=port_var, font=("Segoe UI", 10), width=8)
-    port_entry.grid(row=1, column=2, sticky="w", padx=(10, 0), pady=(0, 8))
+    port_entry.grid(row=1, column=2, sticky="w", padx=(10, 0), pady=(0, 2))
+
+    # Diagnóstico debajo de la IP
+    ip_diag_label = tk.Label(
+        card_server,
+        textvariable=ip_diag_var,
+        font=("Segoe UI", 8),
+        bg=BG_CARD,
+        fg="#6B7280",
+        anchor="w",
+    )
+    ip_diag_label.grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
     # Switch ID
     tk.Label(
@@ -437,10 +581,10 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
         font=("Segoe UI", 9),
         bg=BG_CARD,
         fg=TEXT_MAIN,
-    ).grid(row=2, column=0, sticky="w", pady=(4, 2))
+    ).grid(row=3, column=0, sticky="w", pady=(4, 2))
 
     switch_entry = ttk.Entry(card_server, textvariable=switch_id_var, font=("Segoe UI", 10))
-    switch_entry.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+    switch_entry.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 4))
 
     # Duración
     tk.Label(
@@ -449,7 +593,7 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
         font=("Segoe UI", 9),
         bg=BG_CARD,
         fg=TEXT_MAIN,
-    ).grid(row=2, column=2, sticky="w", padx=(10, 0), pady=(4, 2))
+    ).grid(row=3, column=2, sticky="w", padx=(10, 0), pady=(4, 2))
 
     duration_combo = ttk.Combobox(
         card_server,
@@ -458,7 +602,7 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
         width=7,
         state="readonly",
     )
-    duration_combo.grid(row=3, column=2, sticky="w", padx=(10, 0), pady=(0, 4))
+    duration_combo.grid(row=4, column=2, sticky="w", padx=(10, 0), pady=(0, 4))
 
     card_server.columnconfigure(0, weight=1)
 
@@ -572,11 +716,16 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
     btn_stop.pack(side=tk.LEFT, padx=(0, 8))
 
     def save_env_action():
+        clean_ip = _extract_clean_ip(server_ip_var.get()) or "127.0.0.1"
+        clean_url = influx_url_var.get().strip()
+        if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
+            clean_url = f"http://{clean_url}"
+
         env_content = (
-            f"IPERF_SERVER_IP={server_ip_var.get().strip()}\n"
+            f"IPERF_SERVER_IP={clean_ip}\n"
             f"IPERF_PORT={port_var.get().strip()}\n"
             f"SWITCH_ID={switch_id_var.get().strip()}\n"
-            f"INFLUX_URL={influx_url_var.get().strip()}\n"
+            f"INFLUX_URL={clean_url}\n"
             f"INFLUX_ORG={influx_org_var.get().strip()}\n"
             f"INFLUX_BUCKET={influx_bucket_var.get().strip()}\n"
             f"INFLUX_TOKEN={influx_token_var.get().strip()}\n"
@@ -731,7 +880,7 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
     # Lógica de ejecución de la prueba en hilo secundario
     def run_worker():
         nonlocal is_running, stop_event
-        server_ip = server_ip_var.get().strip()
+        server_ip = _extract_clean_ip(server_ip_var.get())
         switch_id = switch_id_var.get().strip()
         try:
             port = int(port_var.get().strip() or "5201")
@@ -835,10 +984,10 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
 
     def on_start_clicked():
         nonlocal is_running, stop_event
-        server_ip = server_ip_var.get().strip()
+        server_ip = _extract_clean_ip(server_ip_var.get())
         if not server_ip:
             messagebox.showwarning("Falta IP", "Por favor introduce la IP o nombre de host del servidor.")
-            ip_entry.focus_set()
+            ip_combo.focus_set()
             return
 
         with is_running_lock:
