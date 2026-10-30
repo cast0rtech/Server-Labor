@@ -104,6 +104,7 @@ def run_iperf3_test(
     duration: int = DEFAULT_DURATION,
     stop_event: Optional[threading.Event] = None,
     log_callback=None,
+    progress_callback=None,
 ) -> dict[str, Any]:
     """Ejecuta una prueba iperf3 en formato JSON usando el binario nativo."""
     iperf_bin = find_iperf3_binary()
@@ -113,41 +114,64 @@ def run_iperf3_test(
             "Asegúrate de que 'iperf3.exe' esté en la carpeta 'tools' o en el PATH."
         )
 
+    if log_callback:
+        log_callback(f"Conectando a {server_ip}:{port} (duración: {duration}s)...")
+
     cmd = [
         str(iperf_bin),
         "-c", server_ip,
         "-p", str(port),
         "-t", str(duration),
+        "--connect-timeout", "4000",
         "-J",  # Salida JSON estructurada
     ]
 
-    if log_callback:
-        log_callback(f"Conectando a {server_ip}:{port} durante {duration}s...")
-
     # Evita abrir ventanas de consola negras en Windows
-    creationflags = 0
-    if sys.platform == "win32":
-        creationflags = subprocess.CREATE_NO_WINDOW
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        cwd=str(iperf_bin.parent),
         text=True,
         creationflags=creationflags,
     )
 
-    # Monitorizar si el usuario solicita cancelar
-    while process.poll() is None:
+    max_timeout = duration + 10
+    start_time = time.time()
+    last_second = 0
+    stdout = ""
+    stderr = ""
+
+    while True:
         if stop_event and stop_event.is_set():
             process.terminate()
-            time.sleep(0.5)
-            if process.poll() is None:
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
                 process.kill()
             raise InterruptedError("La prueba fue cancelada por el usuario.")
-        time.sleep(0.2)
 
-    stdout, stderr = process.communicate()
+        try:
+            out_chunk, err_chunk = process.communicate(timeout=0.5)
+            stdout = out_chunk
+            stderr = err_chunk
+            break
+        except subprocess.TimeoutExpired:
+            elapsed = time.time() - start_time
+            curr_second = int(elapsed)
+            if curr_second > last_second and curr_second <= duration:
+                last_second = curr_second
+                if progress_callback:
+                    progress_callback(curr_second, duration)
+
+            if elapsed > max_timeout:
+                process.kill()
+                process.communicate()
+                raise TimeoutError(
+                    f"La prueba de iperf3 superó el tiempo máximo ({max_timeout}s) sin responder."
+                )
 
     if not stdout and stderr:
         raise ConnectionError(f"Error en iperf3: {stderr.strip()}")
@@ -159,7 +183,20 @@ def run_iperf3_test(
         raise ConnectionError(f"Fallo al interpretar resultados de iperf3: {error_msg}")
 
     if "error" in data:
-        raise ConnectionError(f"Fallo reportado por iperf3: {data['error']}")
+        err_raw = str(data["error"])
+        if "timed out" in err_raw.lower() or "timeout" in err_raw.lower():
+            msg = (
+                f"Tiempo de espera agotado al conectar con {server_ip}:{port}. "
+                "Comprueba que la IP sea correcta y que el Firewall de Windows en el servidor permita el puerto TCP 5201."
+            )
+        elif "refused" in err_raw.lower():
+            msg = (
+                f"Conexión rechazada en {server_ip}:{port}. "
+                "El servidor iperf3 no está iniciado en esa IP o el puerto 5201 no está escuchando."
+            )
+        else:
+            msg = f"Fallo reportado por iperf3: {err_raw}"
+        raise ConnectionError(msg)
 
     # Extraer métricas clave
     end_data = data.get("end", {})
@@ -644,8 +681,11 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
         influx_token = influx_token_var.get().strip()
 
         root.after(0, lambda: progress_bar.start(10))
-        root.after(0, lambda: status_msg_var.set(f"Ejecutando prueba TCP contra {server_ip}:{port}..."))
+        root.after(0, lambda: status_msg_var.set(f"Conectando a {server_ip}:{port}..."))
         log(f"Iniciando prueba TCP hacia {server_ip}:{port} ({duration} s)")
+
+        def on_test_progress(curr, total):
+            root.after(0, lambda: status_msg_var.set(f"Midiendo ancho de banda ({curr}/{total} s)..."))
 
         try:
             result = run_iperf3_test(
@@ -654,6 +694,7 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
                 duration=duration,
                 stop_event=stop_event,
                 log_callback=log,
+                progress_callback=on_test_progress,
             )
 
             mbps = result["bandwidth_mbps"]

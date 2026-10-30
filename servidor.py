@@ -98,6 +98,27 @@ def find_iperf3_binary() -> Optional[Path]:
     return None
 
 
+def configure_windows_firewall() -> bool:
+    """Intenta habilitar la regla de entrada en el Firewall de Windows para el puerto TCP 5201."""
+    if sys.platform != "win32":
+        return True
+    try:
+        cmd = [
+            "netsh", "advfirewall", "firewall", "add", "rule",
+            "name=RedLab iperf3 TCP 5201",
+            "dir=in", "action=allow", "protocol=TCP", "localport=5201",
+        ]
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
 def ensure_local_iperf_server() -> bool:
     """Inicia el servidor iperf3 nativo si el puerto 5201 no está ocupado."""
     global iperf_process
@@ -110,6 +131,7 @@ def ensure_local_iperf_server() -> bool:
             return False
 
         try:
+            configure_windows_firewall()
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             iperf_process = subprocess.Popen(
                 [str(iperf_bin), "-s", "-p", "5201"],
@@ -260,6 +282,17 @@ async def dashboard() -> str:
                 {ips_html}
             </div>
 
+            <div style="background:#1E293B; border:1px dashed #F59E0B; padding:16px; border-radius:10px; margin-bottom:20px;">
+                <h4 style="color:#FBBF24; font-size:0.9rem; margin-bottom:6px;">⚠️ ¿El cliente da error de conexión o timeout desde otro PC?</h4>
+                <p style="font-size:0.85rem; color:#CBD5E1; margin-bottom:10px;">
+                    El Firewall de Windows suele bloquear el puerto 5201 por defecto. Si el cliente no puede conectar, abre <strong>PowerShell como Administrador</strong> en este servidor y ejecuta:
+                </p>
+                <div style="background:#0F172A; padding:10px 14px; border-radius:6px; font-family:monospace; font-size:0.85rem; color:#38BDF8; display:flex; justify-content:space-between; align-items:center;">
+                    <span>netsh advfirewall firewall add rule name="RedLab iperf3 TCP 5201" dir=in action=allow protocol=TCP localport=5201</span>
+                    <button onclick="navigator.clipboard.writeText('netsh advfirewall firewall add rule name=\"RedLab iperf3 TCP 5201\" dir=in action=allow protocol=TCP localport=5201'); this.innerText='¡Copiado!'; setTimeout(()=>this.innerText='Copiar Regla', 1500);" style="background:#D97706; color:#fff; border:none; padding:4px 12px; border-radius:4px; cursor:pointer; font-size:0.8rem; margin-left:10px;">Copiar Regla</button>
+                </div>
+            </div>
+
             <h3 style="color:#CBD5E1; font-size:1rem; margin-top:20px; margin-bottom:8px;">Estado de Servicios Asociados</h3>
             <div class="links-grid">
                 <a href="http://localhost:3000" target="_blank" class="link-btn">
@@ -313,6 +346,8 @@ if __name__ == "__main__":
     print("-" * 64)
     print(">> Para ejecutar pruebas de red, abre 'SondaCliente.exe'")
     print("   o ejecuta: python cliente.py")
+    print("[!] Si conectas desde otro equipo y da timeout, abre puerto en Firewall:")
+    print('    netsh advfirewall firewall add rule name="RedLab iperf3 TCP 5201" dir=in action=allow protocol=TCP localport=5201')
     print("=" * 64)
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
