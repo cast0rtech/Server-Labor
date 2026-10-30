@@ -43,6 +43,86 @@ logger = logging.getLogger("RedLab.Server")
 
 iperf_process: Optional[subprocess.Popen] = None
 iperf_lock = threading.Lock()
+watchdog_running = True
+iperf_watchdog_thread: Optional[threading.Thread] = None
+
+
+def kill_orphan_iperf_processes() -> None:
+    """Termina de forma forzada cualquier proceso iperf3 residual o colgado."""
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "iperf3.exe"],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
+
+def restart_local_iperf_server(force: bool = False) -> bool:
+    """Inicia o reinicia el servidor iperf3 nativo en el puerto TCP 5201."""
+    global iperf_process
+    with iperf_lock:
+        if not force and is_port_open("127.0.0.1", 5201):
+            return True
+
+        if iperf_process and iperf_process.poll() is None:
+            try:
+                iperf_process.terminate()
+                iperf_process.wait(timeout=1.0)
+            except Exception:
+                try:
+                    iperf_process.kill()
+                except Exception:
+                    pass
+
+        if force:
+            kill_orphan_iperf_processes()
+            time.sleep(0.4)
+
+        iperf_bin = find_iperf3_binary()
+        if not iperf_bin:
+            logger.error("No se encontró iperf3.exe")
+            return False
+
+        try:
+            configure_windows_firewall()
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            iperf_process = subprocess.Popen(
+                [str(iperf_bin), "-s", "-p", "5201"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=str(iperf_bin.parent),
+                creationflags=creationflags,
+            )
+            time.sleep(0.5)
+            active = is_port_open("127.0.0.1", 5201)
+            if active:
+                logger.info("[iPerf3] Servidor activo escuchando en puerto 5201.")
+            else:
+                logger.warning("[iPerf3] Proceso iniciado pero puerto 5201 aún no responde.")
+            return active
+        except Exception as e:
+            logger.error("Error al iniciar iperf3: %s", e)
+            return False
+
+
+def ensure_local_iperf_server() -> bool:
+    """Asegura que el servidor iperf3 esté en ejecución."""
+    return restart_local_iperf_server(force=False)
+
+
+def iperf_watchdog_loop() -> None:
+    """Vigila continuamente el puerto 5201 y lo reactiva automáticamente si se cae."""
+    while watchdog_running:
+        time.sleep(2.5)
+        if not watchdog_running:
+            break
+        # Si el puerto 5201 deja de responder o el proceso murió, reiniciar inmediatamente
+        if not is_port_open("127.0.0.1", 5201):
+            logger.warning("[iPerf3 Watchdog] Puerto 5201 caído o inactivo. Reactivando automáticamente...")
+            restart_local_iperf_server(force=True)
 
 
 def get_classified_ips() -> dict[str, Any]:
@@ -158,44 +238,23 @@ def configure_windows_firewall() -> bool:
         return False
 
 
-def ensure_local_iperf_server() -> bool:
-    """Inicia el servidor iperf3 nativo si el puerto 5201 no está ocupado."""
-    global iperf_process
-    with iperf_lock:
-        if is_port_open("127.0.0.1", 5201):
-            return True
-
-        iperf_bin = find_iperf3_binary()
-        if not iperf_bin:
-            return False
-
-        try:
-            configure_windows_firewall()
-            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-            iperf_process = subprocess.Popen(
-                [str(iperf_bin), "-s", "-p", "5201"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                cwd=str(iperf_bin.parent),
-                creationflags=creationflags,
-            )
-            time.sleep(0.5)
-            return is_port_open("127.0.0.1", 5201)
-        except Exception as e:
-            logger.error("Error al arrancar iperf3: %s", e)
-            return False
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gestión del ciclo de vida del servidor central."""
+    global watchdog_running, iperf_watchdog_thread
+
     # 1. Configurar firewall de Windows
     configure_windows_firewall()
 
     # 2. Iniciar iperf3
-    ensure_local_iperf_server()
+    restart_local_iperf_server(force=False)
 
-    # 3. Iniciar stack nativo InfluxDB + Grafana si ya están presentes
+    # 3. Iniciar vigilancia continua (watchdog) de iperf3
+    watchdog_running = True
+    iperf_watchdog_thread = threading.Thread(target=iperf_watchdog_loop, daemon=True)
+    iperf_watchdog_thread.start()
+
+    # 4. Iniciar stack nativo InfluxDB + Grafana si ya están presentes
     if stack_manager.is_stack_installed():
         threading.Thread(target=stack_manager.setup_and_start_all, daemon=True).start()
     else:
@@ -205,6 +264,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Limpieza al apagar el servidor
+    watchdog_running = False
     global iperf_process
     with iperf_lock:
         if iperf_process and iperf_process.poll() is None:
@@ -271,6 +331,39 @@ async def stack_install() -> dict[str, str]:
     """Inicia la descarga e instalación automática del stack nativo si no está listo."""
     stack_manager.install_native_stack_async()
     return {"status": "started", "message": "Instalación del stack iniciada en segundo plano."}
+
+
+@app.post("/api/iperf/restart")
+async def api_iperf_restart() -> dict[str, Any]:
+    """Reinicia forzosamente el servidor iPerf3 en el puerto 5201 y limpia procesos huérfanos."""
+    ok = restart_local_iperf_server(force=True)
+    return {
+        "status": "ok" if ok else "error",
+        "port": 5201,
+        "active": ok,
+        "message": "Servidor iPerf3 activado y escuchando en el puerto 5201." if ok else "No se pudo reactivar el puerto 5201. Verifica que no esté ocupado por otra aplicación.",
+    }
+
+
+@app.post("/api/iperf/start")
+async def api_iperf_start() -> dict[str, Any]:
+    """Inicia el servidor iPerf3 si está inactivo."""
+    ok = restart_local_iperf_server(force=False)
+    return {"status": "ok" if ok else "error", "port": 5201, "active": ok}
+
+
+@app.post("/api/iperf/stop")
+async def api_iperf_stop() -> dict[str, Any]:
+    """Detiene el servidor iPerf3."""
+    global iperf_process
+    with iperf_lock:
+        if iperf_process and iperf_process.poll() is None:
+            try:
+                iperf_process.terminate()
+            except Exception:
+                pass
+    kill_orphan_iperf_processes()
+    return {"status": "ok", "port": 5201, "active": is_port_open("127.0.0.1", 5201)}
 
 
 @app.get("/api/info")
@@ -415,15 +508,20 @@ async def dashboard() -> str:
             <h3 style="color:#CBD5E1; font-size:1.05rem; margin-bottom:12px;">Servicios Integrados</h3>
             <div class="services-grid">
                 <!-- iPerf3 -->
-                <div class="service-card">
+                <div class="service-card" id="card-iperf">
                     <div>
                         <div class="service-title">
                             <span>🚀 iPerf3 Server</span>
-                            {iperf_badge}
+                            <span id="badge-iperf">{iperf_badge}</span>
                         </div>
-                        <p class="service-desc">Escuchando en puerto <strong>5201</strong> para pruebas de ancho de banda y pérdida de paquetes.</p>
+                        <p class="service-desc">Puerto <strong>5201</strong> (TCP/UDP). Recibe las mediciones de velocidad desde las sondas cliente.</p>
+                        <div style="font-size:0.8rem; color:#94A3B8; margin-bottom:12px;">
+                            Supervisión: <strong style="color:#10B981;">Auto-recuperación activa</strong> (se reactiva solo si se cierra)
+                        </div>
                     </div>
-                    <span style="font-size:0.8rem; color:#64748B;">Listo para conexiones de clientes</span>
+                    <button onclick="restartIperf(this)" class="service-btn" id="btn-restart-iperf" style="background:#2563EB;">
+                        🔄 Reactivar / Reiniciar Puerto 5201
+                    </button>
                 </div>
 
                 <!-- InfluxDB -->
@@ -487,12 +585,56 @@ async def dashboard() -> str:
             setTimeout(() => {{ btn.innerText = original; }}, 1500);
         }}
 
-        // Monitoreo dinámico del estado del stack (InfluxDB y Grafana nativos)
+        async function restartIperf(btn) {{
+            const originalText = btn.innerText;
+            btn.disabled = true;
+            btn.innerText = '⏳ Reactivando puerto 5201...';
+            try {{
+                const res = await fetch('/api/iperf/restart', {{ method: 'POST' }});
+                const data = await res.json();
+                if (data.active) {{
+                    btn.innerText = '✅ Puerto 5201 Activo';
+                    btn.style.background = '#10B981';
+                }} else {{
+                    alert(data.message || 'Error al reactivar el puerto 5201.');
+                }}
+            }} catch(e) {{
+                alert('Error al comunicar con el servidor: ' + e);
+            }} finally {{
+                setTimeout(() => {{
+                    btn.innerText = originalText;
+                    btn.style.background = '#2563EB';
+                    btn.disabled = false;
+                    checkStackStatus();
+                }}, 1500);
+            }}
+        }}
+
+        // Monitoreo dinámico del estado del stack (iPerf3, InfluxDB y Grafana)
         async function checkStackStatus() {{
             try {{
                 const res = await fetch('/api/stack/status');
                 const data = await res.json();
                 
+                // Actualizar Badge iPerf3
+                const badgeIperf = document.getElementById('badge-iperf');
+                const btnIperf = document.getElementById('btn-restart-iperf');
+                if (badgeIperf) {{
+                    if (data.iperf) {{
+                        badgeIperf.innerHTML = '<span class="badge badge-success">● ACTIVO (:5201)</span>';
+                        if (btnIperf && !btnIperf.disabled) {{
+                            btnIperf.style.background = '#2563EB';
+                            btnIperf.innerText = '🔄 Reiniciar Puerto 5201';
+                        }}
+                    }} else {{
+                        badgeIperf.innerHTML = '<span class="badge badge-danger">▲ INACTIVO (:5201)</span>';
+                        if (btnIperf && !btnIperf.disabled) {{
+                            btnIperf.style.background = '#DC2626';
+                            btnIperf.innerText = '▶ Activar Puerto 5201 Ahora';
+                        }}
+                    }}
+                }}
+
                 const progContainer = document.getElementById('stack-progress-container');
                 const progText = document.getElementById('stack-status-text');
                 const progPct = document.getElementById('stack-percent-text');
@@ -517,7 +659,7 @@ async def dashboard() -> str:
             }}
         }}
 
-        setInterval(checkStackStatus, 3000);
+        setInterval(checkStackStatus, 2500);
         checkStackStatus();
     </script>
 </body>
@@ -531,7 +673,12 @@ if __name__ == "__main__":
 
     # Asegurar regla de firewall e iniciar servicios
     configure_windows_firewall()
-    iperf_ready = ensure_local_iperf_server()
+    iperf_ready = restart_local_iperf_server(force=False)
+
+    # Iniciar supervisión continua (watchdog) de iPerf3
+    watchdog_running = True
+    iperf_watchdog_thread = threading.Thread(target=iperf_watchdog_loop, daemon=True)
+    iperf_watchdog_thread.start()
 
     # Iniciar stack nativo InfluxDB + Grafana
     if stack_manager.is_stack_installed():
@@ -556,6 +703,7 @@ if __name__ == "__main__":
     print("-" * 66)
     print("ESTADO DE SERVICIOS NATIVOS:")
     print(f" [●] Servidor iPerf3 : Puerto 5201 {'[OK - ACTIVO]' if iperf_ready else '[INACTIVO]'}")
+    print(f"     Supervisión     : [Watchdog Activo - Auto-recuperación]")
     print(f" [●] InfluxDB v2     : http://localhost:{INFLUX_PORT} {'[OK]' if influx_ready else '[Iniciando/Descargando...]'}")
     print(f" [●] Grafana         : http://localhost:{GRAFANA_PORT} {'[OK]' if grafana_ready else '[Iniciando/Descargando...]'}")
     print(f" [●] Panel Web       : http://localhost:8000")
