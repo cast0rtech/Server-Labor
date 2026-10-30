@@ -167,6 +167,9 @@ try {
     if (Test-Path "tools\cygwin1.dll") {
         Copy-Item -LiteralPath "tools\cygwin1.dll" -Destination (Join-Path $OutputDir "cygwin1.dll") -Force
     }
+    if (Test-Path "abrir_firewall.bat") {
+        Copy-Item -LiteralPath "abrir_firewall.bat" -Destination (Join-Path $OutputDir "abrir_firewall.bat") -Force
+    }
 
     $CompilerCandidates = @()
     foreach ($InstallRoot in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, (Join-Path $env:LocalAppData 'Programs'))) {

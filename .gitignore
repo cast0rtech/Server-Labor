@@ -16,6 +16,5 @@ dist/
 *.spec
 
 # Packaging output binaries
-Empaquetado/*.exe
-Empaquetado/*.dll
+Empaquetado/
 tools/

@@ -27,7 +27,8 @@ PrivilegesRequired=admin
 Source: "Empaquetado\{#MyExe}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RedLab Suite (5201, 4000, 7500, 8000)"" dir=in action=allow protocol=TCP localport=5201,4000,7500,8000"; Flags: runhidden; StatusMsg: "Configurando el Firewall de Windows..."
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RedLab Suite (5201, 4000, 7500, 8000)"" dir=in action=allow protocol=TCP localport=5201,4000,7500,8000 profile=any"; Flags: runhidden; StatusMsg: "Configurando el Firewall de Windows para TCP..."
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RedLab iperf3 UDP 5201"" dir=in action=allow protocol=UDP localport=5201 profile=any"; Flags: runhidden; StatusMsg: "Configurando el Firewall de Windows para UDP..."
 Filename: "{app}\{#MyExe}"; Description: "Iniciar RedLab Tester - Servidor"; Flags: postinstall nowait skipifsilent
 
 [Code]

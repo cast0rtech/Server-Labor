@@ -30,6 +30,7 @@ Name: "client"; Description: "Cliente (pruebas desde el switch)"; Types: full cl
 [Files]
 Source: "Empaquetado\ServidorLab.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: server
 Source: "Empaquetado\SondaCliente.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: client
+Source: "abrir_firewall.bat"; DestDir: "{app}"; Flags: ignoreversion; Components: server
 
 #if FileExists("tools\iperf3.exe")
 Source: "tools\iperf3.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: server or client
@@ -57,6 +58,7 @@ Name: "{group}\RedLab Tester - Cliente"; Filename: "{app}\SondaCliente.exe"; Wor
 Name: "{group}\Desinstalar RedLab Tester"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RedLab Suite (5201, 4000, 7500, 8000)"" dir=in action=allow protocol=TCP localport=5201,4000,7500,8000"; Flags: runhidden; StatusMsg: "Configurando el Firewall de Windows para RedLab (puertos 5201, 4000, 7500, 8000)..."; Components: server
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RedLab iperf3 UDP 5201"" dir=in action=allow protocol=UDP localport=5201"; Flags: runhidden; StatusMsg: "Abriendo el puerto UDP 5201 en el Firewall de Windows..."; Components: server
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RedLab Suite (5201, 4000, 7500, 8000)"" dir=in action=allow protocol=TCP localport=5201,4000,7500,8000 profile=any"; Flags: runhidden; StatusMsg: "Configurando el Firewall de Windows para RedLab (puertos 5201, 4000, 7500, 8000)..."; Components: server
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RedLab iperf3 UDP 5201"" dir=in action=allow protocol=UDP localport=5201 profile=any"; Flags: runhidden; StatusMsg: "Abriendo el puerto UDP 5201 en el Firewall de Windows..."; Components: server
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RedLab iPerf3 App"" dir=in action=allow program=""{app}\tools\iperf3.exe"" profile=any"; Flags: runhidden; StatusMsg: "Autorizando iperf3 en el Firewall..."; Components: server
 Filename: "{app}\ServidorLab.exe"; Description: "Iniciar el panel de control RedLab Tester"; Flags: postinstall nowait skipifsilent; Components: server

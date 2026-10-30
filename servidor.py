@@ -64,7 +64,7 @@ def restart_local_iperf_server(force: bool = False) -> bool:
     """Inicia o reinicia el servidor iperf3 nativo en el puerto TCP 5201."""
     global iperf_process
     with iperf_lock:
-        if not force and is_port_open("127.0.0.1", 5201):
+        if not force and iperf_process and iperf_process.poll() is None and is_port_open("127.0.0.1", 5201, timeout=0.5):
             return True
 
         if iperf_process and iperf_process.poll() is None:
@@ -77,9 +77,9 @@ def restart_local_iperf_server(force: bool = False) -> bool:
                 except Exception:
                     pass
 
-        if force:
-            kill_orphan_iperf_processes()
-            time.sleep(0.4)
+        # Terminar siempre procesos huérfanos antes de iniciar una nueva instancia limpia
+        kill_orphan_iperf_processes()
+        time.sleep(0.3)
 
         iperf_bin = find_iperf3_binary()
         if not iperf_bin:
@@ -89,17 +89,28 @@ def restart_local_iperf_server(force: bool = False) -> bool:
         try:
             configure_windows_firewall()
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            # Parámetros robustos para iperf3 en Windows:
+            # -4: Solo IPv4
+            # --idle-timeout 15: Si el servidor queda colgado sin cliente, se reinicia solo tras 15 s
+            # --server-max-duration 35: Límite máximo de 35 s por prueba para evitar bloqueos
             iperf_process = subprocess.Popen(
-                [str(iperf_bin), "-s", "-p", "5201"],
+                [
+                    str(iperf_bin),
+                    "-s",
+                    "-p", "5201",
+                    "-4",
+                    "--idle-timeout", "15",
+                    "--server-max-duration", "35",
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 cwd=str(iperf_bin.parent),
                 creationflags=creationflags,
             )
-            time.sleep(0.5)
-            active = is_port_open("127.0.0.1", 5201)
+            time.sleep(0.6)
+            active = is_port_open("127.0.0.1", 5201, timeout=1.0)
             if active:
-                logger.info("[iPerf3] Servidor activo escuchando en puerto 5201.")
+                logger.info("[iPerf3] Servidor activo escuchando en puerto 5201 (IPv4, timeouts configurados).")
             else:
                 logger.warning("[iPerf3] Proceso iniciado pero puerto 5201 aún no responde.")
             return active
@@ -114,14 +125,21 @@ def ensure_local_iperf_server() -> bool:
 
 
 def iperf_watchdog_loop() -> None:
-    """Vigila continuamente el puerto 5201 y lo reactiva automáticamente si se cae."""
+    """Supervisa que el proceso iPerf3 siga vivo sin interferir en las mediciones activas."""
+    global watchdog_running, iperf_process
     while watchdog_running:
-        time.sleep(2.5)
+        time.sleep(3.0)
         if not watchdog_running:
             break
-        # Si el puerto 5201 deja de responder o el proceso murió, reiniciar inmediatamente
-        if not is_port_open("127.0.0.1", 5201):
-            logger.warning("[iPerf3 Watchdog] Puerto 5201 caído o inactivo. Reactivando automáticamente...")
+
+        # Comprobar estado del proceso sin realizar conexiones de socket intrusivas.
+        # En Windows, abrir sockets periódicamente en 5201 colisiona con las mediciones
+        # de los clientes y provoca abortos o desconexiones forzadas.
+        with iperf_lock:
+            proc_alive = (iperf_process is not None and iperf_process.poll() is None)
+
+        if not proc_alive:
+            logger.warning("[iPerf3 Watchdog] Proceso iPerf3 terminado o inactivo. Reactivando automáticamente...")
             restart_local_iperf_server(force=True)
 
 
@@ -227,25 +245,57 @@ def find_iperf3_binary() -> Optional[Path]:
 
 
 def configure_windows_firewall() -> bool:
-    """Habilita la regla de entrada en el Firewall de Windows para los puertos del stack."""
+    """Habilita reglas de entrada en el Firewall de Windows para los puertos del stack y binarios."""
     if sys.platform != "win32":
         return True
     ports = f"5201,{INFLUX_PORT},{GRAFANA_PORT},8000"
-    cmd = [
+    iperf_bin = find_iperf3_binary()
+    all_ok = True
+
+    # 1. Regla TCP para todos los perfiles (Dominio, Privada, Pública)
+    cmd_tcp = [
         "netsh", "advfirewall", "firewall", "add", "rule",
-        f"name=RedLab Tester Suite ({ports})",
+        f"name=RedLab Suite TCP ({ports})",
         "dir=in", "action=allow", "protocol=TCP", f"localport={ports}",
+        "profile=any",
     ]
-    try:
-        res = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-        )
-        return res.returncode == 0
-    except Exception:
-        return False
+    # 2. Regla UDP para puerto 5201
+    cmd_udp = [
+        "netsh", "advfirewall", "firewall", "add", "rule",
+        "name=RedLab iPerf3 UDP (5201)",
+        "dir=in", "action=allow", "protocol=UDP", "localport=5201",
+        "profile=any",
+    ]
+
+    for cmd in (cmd_tcp, cmd_udp):
+        try:
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            if res.returncode != 0:
+                all_ok = False
+        except Exception:
+            all_ok = False
+
+    if iperf_bin and iperf_bin.is_file():
+        try:
+            subprocess.run(
+                [
+                    "netsh", "advfirewall", "firewall", "add", "rule",
+                    "name=RedLab iPerf3 Program",
+                    "dir=in", "action=allow", f"program={iperf_bin}",
+                    "profile=any",
+                ],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+        except Exception:
+            pass
+
+    return all_ok
 
 
 @asynccontextmanager
@@ -256,13 +306,14 @@ async def lifespan(app: FastAPI):
     # 1. Configurar firewall de Windows
     configure_windows_firewall()
 
-    # 2. Iniciar iperf3
+    # 2. Iniciar iperf3 garantizando instancia supervisada y limpia
     restart_local_iperf_server(force=False)
 
-    # 3. Iniciar vigilancia continua (watchdog) de iperf3
+    # 3. Iniciar vigilancia continua (watchdog) de iperf3 si no está activa
     watchdog_running = True
-    iperf_watchdog_thread = threading.Thread(target=iperf_watchdog_loop, daemon=True)
-    iperf_watchdog_thread.start()
+    if iperf_watchdog_thread is None or not iperf_watchdog_thread.is_alive():
+        iperf_watchdog_thread = threading.Thread(target=iperf_watchdog_loop, daemon=True)
+        iperf_watchdog_thread.start()
 
     # 4. Iniciar stack nativo InfluxDB + Grafana si ya están presentes
     if stack_manager.is_stack_installed():
@@ -648,10 +699,10 @@ async def dashboard() -> str:
             <!-- FIREWALL HELP -->
             <div class="firewall-box">
                 <h4>⚠️ ¿El cliente da timeout o error de conexión desde otro PC?</h4>
-                <p>El Firewall de Windows suele bloquear puertos entrantes por defecto. Si la sonda no puede conectar, abre <strong>PowerShell como Administrador</strong> en este equipo y ejecuta:</p>
+                <p>El Firewall de Windows suele bloquear puertos entrantes por defecto en redes públicas o VPNs. Ejecuta el archivo <strong>abrir_firewall.bat como Administrador</strong> o abre <strong>PowerShell como Administrador</strong> y ejecuta:</p>
                 <div class="cmd-snippet">
-                    <span>netsh advfirewall firewall add rule name="RedLab Suite" dir=in action=allow protocol=TCP localport=5201,4000,7500,8000</span>
-                    <button onclick="copyText('netsh advfirewall firewall add rule name=&quot;RedLab Suite&quot; dir=in action=allow protocol=TCP localport=5201,4000,7500,8000', this)" class="btn-copy">Copiar</button>
+                    <span>netsh advfirewall firewall add rule name="RedLab Suite" dir=in action=allow protocol=TCP localport=5201,4000,7500,8000 profile=any</span>
+                    <button onclick="copyText('netsh advfirewall firewall add rule name=&quot;RedLab Suite&quot; dir=in action=allow protocol=TCP localport=5201,4000,7500,8000 profile=any', this)" class="btn-copy">Copiar</button>
                 </div>
             </div>
 
@@ -826,12 +877,13 @@ if __name__ == "__main__":
 
     # Asegurar regla de firewall e iniciar servicios
     configure_windows_firewall()
-    iperf_ready = restart_local_iperf_server(force=False)
+    iperf_ready = restart_local_iperf_server(force=True)
 
-    # Iniciar supervisión continua (watchdog) de iPerf3
+    # Iniciar supervisión continua (watchdog) de iPerf3 si no está activa
     watchdog_running = True
-    iperf_watchdog_thread = threading.Thread(target=iperf_watchdog_loop, daemon=True)
-    iperf_watchdog_thread.start()
+    if iperf_watchdog_thread is None or not iperf_watchdog_thread.is_alive():
+        iperf_watchdog_thread = threading.Thread(target=iperf_watchdog_loop, daemon=True)
+        iperf_watchdog_thread.start()
 
     # Iniciar stack nativo InfluxDB + Grafana
     if stack_manager.is_stack_installed():
@@ -866,8 +918,8 @@ if __name__ == "__main__":
         mark = "⭐ (Recomendada)" if item["is_primary"] else f"({item['tag']})"
         print(f"  -> {item['ip']:<16} {mark}")
     print("-" * 66)
-    print(">> Si el cliente da timeout desde otro PC, ejecuta como Administrador:")
-    print('   netsh advfirewall firewall add rule name="RedLab Suite" dir=in action=allow protocol=TCP localport=5201,4000,7500,8000')
+    print(">> Si el cliente da timeout desde otro PC, ejecuta 'abrir_firewall.bat' o:")
+    print('   netsh advfirewall firewall add rule name="RedLab Suite" dir=in action=allow protocol=TCP localport=5201,4000,7500,8000 profile=any')
     print("=" * 66)
 
     uvicorn.run(app, host="0.0.0.0", port=8000)

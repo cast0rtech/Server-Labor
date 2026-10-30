@@ -137,8 +137,10 @@ def run_iperf3_test(
         "-c", server_ip,
         "-p", str(port),
         "-t", str(duration),
+        "-4",                     # Forzar IPv4
         "--connect-timeout", "4000",
-        "-J",  # Salida JSON estructurada
+        "--rcv-timeout", "6000",  # Aborta rápido (6 s) si la transmisión de datos se congela
+        "-J",                     # Salida JSON estructurada
     ]
 
     # Evita abrir ventanas de consola negras en Windows
@@ -184,24 +186,35 @@ def run_iperf3_test(
             if elapsed > max_timeout:
                 process.kill()
                 try:
-                    _, err_tail = process.communicate(timeout=2)
+                    out_tail, err_tail = process.communicate(timeout=1.5)
                 except Exception:
-                    err_tail = ""
+                    out_tail, err_tail = "", ""
+
+                extra_err = ""
+                if out_tail:
+                    try:
+                        d_err = json.loads(out_tail)
+                        if "error" in d_err:
+                            extra_err = f" Detalle: {d_err['error']}"
+                    except Exception:
+                        pass
+                if not extra_err and err_tail and err_tail.strip():
+                    extra_err = f" Detalle: {err_tail.strip()}"
+
                 reachable, _ = test_tcp_connectivity(server_ip, port, timeout=3.0)
                 if reachable:
                     hint = (
-                        "El puerto responde, pero la prueba no avanza. Causas habituales: "
-                        "el servidor iperf3 está ocupado con otra prueba (cierra y abre de nuevo ServidorLab), "
-                        "un antivirus/firewall bloquea el tráfico de datos, o el servidor es otro programa distinto de iperf3."
+                        "El puerto responde, pero la transmisión de datos no avanzó. Causas habituales: "
+                        "el servidor iperf3 está ocupado con otra prueba, el Firewall de Windows en el servidor "
+                        "bloquea el tráfico de red, o el servidor se reinició en segundo plano."
                     )
                 else:
                     hint = (
                         f"No hay conexión con {server_ip}:{port}. Comprueba la IP, que ServidorLab esté abierto "
-                        "en ese equipo y que el Firewall de Windows permita el puerto TCP 5201."
+                        "en ese equipo y que el Firewall de Windows permita el puerto TCP 5201 en todas las redes."
                     )
-                detail = f" Detalle: {err_tail.strip()}" if err_tail and err_tail.strip() else ""
                 raise TimeoutError(
-                    f"La prueba superó el tiempo máximo ({max_timeout} s) sin respuesta. {hint}{detail}"
+                    f"La prueba superó el tiempo máximo ({max_timeout} s) sin respuesta. {hint}{extra_err}"
                 )
 
     if not stdout and stderr:
@@ -216,9 +229,21 @@ def run_iperf3_test(
     if "error" in data:
         err_raw = str(data["error"])
         if "timed out" in err_raw.lower() or "timeout" in err_raw.lower():
+            if "idle timeout" in err_raw.lower():
+                msg = (
+                    f"Tiempo de inactividad de datos agotado con {server_ip}:{port}. "
+                    "El servidor aceptó la conexión pero no transmitió paquetes. "
+                    "Comprueba que el Firewall de Windows en el servidor permita el puerto 5201 (perfil de red pública y privada)."
+                )
+            else:
+                msg = (
+                    f"Tiempo de espera agotado al conectar con {server_ip}:{port}. "
+                    "Comprueba que la IP sea correcta y que el Firewall de Windows en el servidor permita el puerto TCP 5201."
+                )
+        elif "busy" in err_raw.lower():
             msg = (
-                f"Tiempo de espera agotado al conectar con {server_ip}:{port}. "
-                "Comprueba que la IP sea correcta y que el Firewall de Windows en el servidor permita el puerto TCP 5201."
+                f"El servidor en {server_ip}:{port} está ocupado con otra prueba. "
+                "Espera unos segundos o pulsa '🔄 Reactivar Puerto 5201' en el panel del servidor."
             )
         elif "refused" in err_raw.lower():
             msg = (
@@ -971,7 +996,11 @@ def launch_gui(initial_env_file: Optional[Path] = None) -> None:
             log("Prueba cancelada por el usuario.")
             root.after(0, lambda: status_msg_var.set("Prueba cancelada."))
         except Exception as ex:
-            error_text = str(ex) or f"{type(ex).__name__}: error desconocido"
+            raw_err = str(ex).strip()
+            if not raw_err or raw_err.lower() == "none":
+                error_text = f"Error en la prueba ({type(ex).__name__}): la medición falló sin mensaje detallado."
+            else:
+                error_text = raw_err
             log(f"ERROR: {error_text}")
             root.after(0, lambda msg=error_text: status_msg_var.set(f"Fallo en la prueba: {msg}"))
             root.after(0, lambda msg=error_text: messagebox.showerror("Error en la prueba", msg))
