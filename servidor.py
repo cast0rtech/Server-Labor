@@ -58,6 +58,11 @@ def kill_orphan_iperf_processes() -> None:
             )
         except Exception:
             pass
+    else:
+        try:
+            subprocess.run(["pkill", "-9", "iperf3"], capture_output=True)
+        except Exception:
+            pass
 
 
 def restart_local_iperf_server(force: bool = False) -> bool:
@@ -242,6 +247,93 @@ def find_iperf3_binary() -> Optional[Path]:
     if which:
         return Path(which).resolve()
     return None
+
+
+def get_system_metrics() -> dict[str, Any]:
+    """Obtiene métricas de hardware del sistema (temperatura, RAM, disco, uptime)."""
+    metrics: dict[str, Any] = {
+        "platform": sys.platform,
+        "is_rpi": False,
+        "rpi_model": None,
+        "cpu_temp": None,
+        "ram_percent": None,
+        "ram_used_mb": None,
+        "ram_total_mb": None,
+        "disk_free_gb": None,
+        "disk_total_gb": None,
+        "disk_percent": None,
+        "uptime_str": None,
+    }
+
+    # Detectar si es Raspberry Pi
+    model_path = Path("/sys/firmware/devicetree/base/model")
+    if model_path.exists():
+        try:
+            metrics["rpi_model"] = model_path.read_text(encoding="utf-8", errors="ignore").replace("\x00", "").strip()
+            metrics["is_rpi"] = True
+        except Exception:
+            pass
+
+    # Temperatura CPU en Linux/Raspberry Pi
+    for t_path in [
+        Path("/sys/class/thermal/thermal_zone0/temp"),
+        Path("/sys/devices/virtual/thermal/thermal_zone0/temp"),
+    ]:
+        if t_path.exists():
+            try:
+                val = int(t_path.read_text().strip())
+                metrics["cpu_temp"] = round(val / 1000.0, 1)
+                break
+            except Exception:
+                pass
+
+    # Espacio en Disco / Tarjeta SD
+    try:
+        check_path = "/" if sys.platform != "win32" else (Path(__file__).resolve().anchor or "C:\\")
+        total, used, free = shutil.disk_usage(check_path)
+        metrics["disk_total_gb"] = round(total / (1024**3), 1)
+        metrics["disk_free_gb"] = round(free / (1024**3), 1)
+        metrics["disk_percent"] = round((used / total) * 100, 1)
+    except Exception:
+        pass
+
+    # Memoria RAM en Linux
+    mem_path = Path("/proc/meminfo")
+    if mem_path.exists():
+        try:
+            data = {}
+            for line in mem_path.read_text().splitlines():
+                parts = line.split(":")
+                if len(parts) == 2:
+                    data[parts[0].strip()] = int(parts[1].replace("kB", "").strip())
+            if "MemTotal" in data and "MemAvailable" in data:
+                total_kb = data["MemTotal"]
+                avail_kb = data["MemAvailable"]
+                used_kb = total_kb - avail_kb
+                metrics["ram_percent"] = round((used_kb / total_kb) * 100, 1)
+                metrics["ram_used_mb"] = round(used_kb / 1024)
+                metrics["ram_total_mb"] = round(total_kb / 1024)
+        except Exception:
+            pass
+
+    # Tiempo de actividad (Uptime)
+    uptime_path = Path("/proc/uptime")
+    if uptime_path.exists():
+        try:
+            secs = float(uptime_path.read_text().split()[0])
+            mins = int(secs // 60)
+            hours = mins // 60
+            days = hours // 24
+            if days > 0:
+                metrics["uptime_str"] = f"{days}d {hours % 24}h {mins % 60}m"
+            elif hours > 0:
+                metrics["uptime_str"] = f"{hours}h {mins % 60}m"
+            else:
+                metrics["uptime_str"] = f"{mins} min"
+        except Exception:
+            pass
+
+    return metrics
 
 
 def configure_windows_firewall() -> bool:
@@ -476,6 +568,7 @@ async def api_select_ip(payload: dict) -> dict[str, Any]:
 async def info() -> dict:
     """Información completa de diagnóstico del servidor."""
     info_ips = get_classified_ips()
+    metrics = get_system_metrics()
     return {
         "status": "ready",
         "hostname": platform.node(),
@@ -487,7 +580,434 @@ async def info() -> dict:
         "influx_active": is_port_open("127.0.0.1", INFLUX_PORT),
         "grafana_port": GRAFANA_PORT,
         "grafana_active": is_port_open("127.0.0.1", GRAFANA_PORT),
+        "hardware": metrics,
     }
+
+
+@app.post("/api/docker/restart")
+async def api_docker_restart() -> dict[str, Any]:
+    """Reinicia todos los contenedores de Docker (InfluxDB, Grafana, iPerf3)."""
+    try:
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        app_dir = Path(__file__).resolve().parent
+        res = subprocess.run(
+            ["docker", "compose", "restart"],
+            capture_output=True,
+            text=True,
+            cwd=str(app_dir),
+            timeout=60,
+            creationflags=creationflags,
+        )
+        if res.returncode == 0:
+            return {"status": "ok", "message": "Contenedores Docker reiniciados con éxito."}
+        else:
+            # Intentar reiniciar por nombres directos
+            res2 = subprocess.run(
+                ["docker", "restart", "redlab-influxdb", "redlab-grafana", "redlab-iperf3"],
+                capture_output=True,
+                text=True,
+                timeout=45,
+                creationflags=creationflags,
+            )
+            if res2.returncode == 0:
+                return {"status": "ok", "message": "Contenedores reiniciados correctamente."}
+            return {"status": "error", "message": res.stderr.strip() or res.stdout.strip()}
+    except Exception as e:
+        return {"status": "error", "message": f"Error al reiniciar contenedores: {e}"}
+
+
+@app.post("/api/system/reboot")
+async def api_system_reboot() -> dict[str, Any]:
+    """Reinicia de forma segura el host (Raspberry Pi o PC servidor)."""
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["shutdown", "/r", "/t", "5"])
+        else:
+            subprocess.Popen(["sudo", "reboot"])
+        return {"status": "ok", "message": "Reiniciando el sistema en 5 segundos..."}
+    except Exception as e:
+        return {"status": "error", "message": f"No se pudo ejecutar el reinicio: {e}"}
+
+
+@app.get("/api/system/metrics")
+async def api_system_metrics() -> dict[str, Any]:
+    """Devuelve las métricas de hardware de la Raspberry Pi / PC."""
+    return {"status": "ok", "metrics": get_system_metrics()}
+
+
+@app.get("/api/admin/config")
+async def api_get_admin_config() -> dict[str, Any]:
+    """Devuelve la configuración actual de credenciales, puertos y red."""
+    app_dir = Path(__file__).resolve().parent
+    env_file = app_dir / ".env"
+    env_vars: dict[str, str] = {}
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env_vars[k.strip()] = v.strip()
+
+    ips = get_classified_ips()
+    metrics = get_system_metrics()
+    return {
+        "status": "ok",
+        "influx_org": env_vars.get("INFLUX_ORG", INFLUX_ORG),
+        "influx_bucket": env_vars.get("INFLUX_BUCKET", INFLUX_BUCKET),
+        "influx_token": env_vars.get("INFLUX_TOKEN", INFLUX_TOKEN),
+        "influx_port": env_vars.get("INFLUX_PORT", str(INFLUX_PORT)),
+        "grafana_port": env_vars.get("GRAFANA_PORT", str(GRAFANA_PORT)),
+        "grafana_user": env_vars.get("GRAFANA_USER", GRAFANA_USER),
+        "grafana_password": env_vars.get("GRAFANA_PASSWORD", GRAFANA_PASSWORD),
+        "iperf_port": 5201,
+        "selected_ip": ips["selected"],
+        "primary_ip": ips["primary"],
+        "all_ips": ips["all"],
+        "hardware": metrics,
+    }
+
+
+@app.post("/api/admin/config")
+async def api_save_admin_config(payload: dict) -> dict[str, Any]:
+    """Guarda las nuevas credenciales y configuración en el archivo .env."""
+    global user_selected_ip
+    try:
+        app_dir = Path(__file__).resolve().parent
+        env_file = app_dir / ".env"
+
+        # Actualizar IP preferente si se envió
+        new_ip = str(payload.get("selected_ip", "")).strip()
+        if new_ip:
+            user_selected_ip = new_ip
+
+        # Leer o construir .env
+        org = str(payload.get("influx_org", INFLUX_ORG)).strip()
+        bucket = str(payload.get("influx_bucket", INFLUX_BUCKET)).strip()
+        token = str(payload.get("influx_token", INFLUX_TOKEN)).strip()
+        g_user = str(payload.get("grafana_user", GRAFANA_USER)).strip()
+        g_pass = str(payload.get("grafana_password", GRAFANA_PASSWORD)).strip()
+
+        env_content = f"""# Configuración de RedLab Tester
+INFLUX_PORT={INFLUX_PORT}
+GRAFANA_PORT={GRAFANA_PORT}
+INFLUX_ORG={org}
+INFLUX_BUCKET={bucket}
+INFLUX_TOKEN={token}
+GRAFANA_USER={g_user}
+GRAFANA_PASSWORD={g_pass}
+SELECTED_SERVER_IP={user_selected_ip or ''}
+"""
+        env_file.write_text(env_content, encoding="utf-8")
+        return {"status": "ok", "message": "Configuración guardada correctamente en .env."}
+    except Exception as e:
+        return {"status": "error", "message": f"Error al guardar configuración: {e}"}
+
+
+@app.get("/admin", response_class=HTMLResponse)
+@app.get("/setup", response_class=HTMLResponse)
+async def admin_dashboard() -> str:
+    """Panel de configuración administrativo (Setup-Admin UI)."""
+    info_ips = get_classified_ips()
+    primary_ip = info_ips["primary"]
+    metrics = get_system_metrics()
+
+    iperf_ok = is_port_open("127.0.0.1", 5201)
+    influx_ok = is_port_open("127.0.0.1", INFLUX_PORT)
+    grafana_ok = is_port_open("127.0.0.1", GRAFANA_PORT)
+
+    hw_info = metrics.get("rpi_model") or platform.machine()
+    temp_val = f"{metrics['cpu_temp']} °C" if metrics.get("cpu_temp") else "N/D"
+    ram_val = f"{metrics.get('ram_percent', '--')}% ({metrics.get('ram_used_mb', 0)} / {metrics.get('ram_total_mb', 0)} MB)" if metrics.get("ram_percent") else "N/D"
+    disk_val = f"{metrics.get('disk_free_gb', '--')} GB libres de {metrics.get('disk_total_gb', '--')} GB ({metrics.get('disk_percent', '--')}% usado)"
+    uptime_val = metrics.get("uptime_str") or "Desconocido"
+
+    ip_options_html = ""
+    for item in info_ips["all"]:
+        is_sel = item["ip"] == primary_ip
+        ip_options_html += f'<option value="{item["ip"]}" {"selected" if is_sel else ""}>{item["ip"]}  ({item["tag"]})</option>'
+
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RedLab Tester - Setup & Admin UI</title>
+    <style>
+        * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+        body {{ background: #0B1120; color: #E2E8F0; padding: 24px 16px; min-height: 100vh; display: flex; justify-content: center; }}
+        .container {{ max-width: 900px; width: 100%; }}
+        .card {{ background: #131D31; border-radius: 14px; padding: 24px; margin-bottom: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #1E293B; }}
+        
+        .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }}
+        h1 {{ font-size: 1.5rem; color: #F8FAFC; display: flex; align-items: center; gap: 10px; }}
+        .nav-links {{ display: flex; gap: 10px; }}
+        .nav-btn {{ background: #1E293B; color: #38BDF8; padding: 8px 14px; border-radius: 8px; text-decoration: none; font-size: 0.85rem; font-weight: 600; border: 1px solid #334155; transition: all 0.2s; }}
+        .nav-btn:hover {{ background: #2563EB; color: #FFF; border-color: #2563EB; }}
+        
+        .section-title {{ font-size: 1.1rem; color: #93C5FD; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #1E293B; padding-bottom: 8px; }}
+        
+        .grid-2 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 16px; }}
+        .form-group {{ margin-bottom: 14px; }}
+        .form-group label {{ display: block; font-size: 0.82rem; font-weight: 600; color: #CBD5E1; margin-bottom: 5px; }}
+        .form-control {{ width: 100%; background: #0F172A; border: 1px solid #334155; color: #F1F5F9; padding: 9px 12px; border-radius: 6px; font-size: 0.9rem; }}
+        .form-control:focus {{ outline: none; border-color: #3B82F6; }}
+        
+        .btn {{ padding: 10px 18px; border-radius: 8px; font-size: 0.9rem; font-weight: 600; cursor: pointer; border: none; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; }}
+        .btn-primary {{ background: #2563EB; color: #FFF; }}
+        .btn-primary:hover {{ background: #1D4ED8; }}
+        .btn-success {{ background: #10B981; color: #FFF; }}
+        .btn-success:hover {{ background: #059669; }}
+        .btn-warning {{ background: #F59E0B; color: #1E293B; }}
+        .btn-warning:hover {{ background: #D97706; }}
+        .btn-danger {{ background: #EF4444; color: #FFF; }}
+        .btn-danger:hover {{ background: #DC2626; }}
+
+        .status-badge {{ padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 700; }}
+        .badge-ok {{ background: #10B981; color: #FFF; }}
+        .badge-err {{ background: #EF4444; color: #FFF; }}
+        
+        .hardware-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }}
+        .hw-card {{ background: #0F172A; border: 1px solid #1E293B; padding: 14px; border-radius: 8px; }}
+        .hw-label {{ font-size: 0.75rem; color: #94A3B8; text-transform: uppercase; margin-bottom: 4px; }}
+        .hw-val {{ font-size: 1.15rem; font-weight: bold; color: #38BDF8; font-family: monospace; }}
+        
+        .alert {{ padding: 12px 16px; border-radius: 8px; font-size: 0.85rem; margin-bottom: 14px; display: none; }}
+        .alert-success {{ background: rgba(16, 185, 129, 0.2); border: 1px solid #10B981; color: #6EE7B7; }}
+        .alert-error {{ background: rgba(239, 68, 68, 0.2); border: 1px solid #EF4444; color: #FCA5A5; }}
+        
+        .hint-box {{ background: #1E293B; border-left: 4px solid #3B82F6; padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 0.84rem; color: #CBD5E1; margin-bottom: 14px; line-height: 1.5; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- HEADER -->
+        <div class="card">
+            <div class="header">
+                <div>
+                    <h1>⚙️ RedLab Tester - Setup & Admin UI</h1>
+                    <p style="color:#94A3B8; font-size:0.85rem; margin-top:4px;">Configuración de credenciales, selección de IP de pruebas, enlace de red y control de contenedores.</p>
+                </div>
+                <div class="nav-links">
+                    <a href="/" class="nav-btn">📊 Dashboard</a>
+                    <a href="http://{primary_ip}:{GRAFANA_PORT}" target="_blank" class="nav-btn">📈 Grafana</a>
+                    <a href="http://{primary_ip}:{INFLUX_PORT}" target="_blank" class="nav-btn">🗄️ InfluxDB</a>
+                </div>
+            </div>
+            <div id="alert-box" class="alert"></div>
+        </div>
+
+        <!-- SELECCION DE IP DE PRUEBAS & RED -->
+        <div class="card">
+            <div class="section-title">🌐 Configuración de Red e IP de Pruebas</div>
+            <div class="hint-box">
+                <strong>¿Cómo conectar con la Raspberry Pi o Servidor?</strong><br>
+                • <strong>DHCP Automático:</strong> Conecta a tu switch/router y accede por la IP asignada o por nombre <code>http://redlab.local:8000</code><br>
+                • <strong>Enlace Fijo Directo (Fallback sin router):</strong> Conecta un cable de red directo del PC a la Raspberry Pi. Siempre responderá en <code>http://192.168.1.200:8000</code>
+            </div>
+
+            <div class="grid-2">
+                <div class="form-group">
+                    <label>IP Seleccionada para que midan las sondas:</label>
+                    <select id="sel-ip" class="form-control">
+                        {ip_options_html}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Enlace Fijo de Respaldo (Fallback):</label>
+                    <input type="text" class="form-control" value="192.168.1.200/24 (eth0:0)" readonly style="color:#94A3B8; background:#1E293B;">
+                </div>
+            </div>
+            <button onclick="applySelectedIp()" class="btn btn-primary">✅ Aplicar IP de Pruebas</button>
+        </div>
+
+        <!-- CREDENCIALES DEL SISTEMA (.ENV) -->
+        <div class="card">
+            <div class="section-title">🔐 Credenciales de Base de Datos y Dashboards (.env)</div>
+            <div class="grid-2">
+                <div class="form-group">
+                    <label>InfluxDB Organización:</label>
+                    <input type="text" id="cfg-org" class="form-control" value="{INFLUX_ORG}">
+                </div>
+                <div class="form-group">
+                    <label>InfluxDB Bucket de Telemetría:</label>
+                    <input type="text" id="cfg-bucket" class="form-control" value="{INFLUX_BUCKET}">
+                </div>
+                <div class="form-group" style="grid-column: 1 / -1;">
+                    <label>InfluxDB Admin Token Seguro:</label>
+                    <input type="text" id="cfg-token" class="form-control" value="{INFLUX_TOKEN}" style="font-family:monospace;">
+                </div>
+                <div class="form-group">
+                    <label>Grafana Usuario Administrador:</label>
+                    <input type="text" id="cfg-guser" class="form-control" value="{GRAFANA_USER}">
+                </div>
+                <div class="form-group">
+                    <label>Grafana Contraseña Administrador:</label>
+                    <input type="password" id="cfg-gpass" class="form-control" value="{GRAFANA_PASSWORD}">
+                </div>
+            </div>
+            <button onclick="saveCredentials()" class="btn btn-success">💾 Guardar Credenciales en .env</button>
+        </div>
+
+        <!-- ESTADO Y CONTROL DE CONTENEDORES DOCKER -->
+        <div class="card">
+            <div class="section-title">🐳 Servicios Integrados & Contenedores Docker</div>
+            <p style="font-size:0.85rem; color:#94A3B8; margin-bottom:14px;">Todos los contenedores están configurados con la política <code>restart: always</code> para reiniciarse automáticamente tras cortes de energía o fallos.</p>
+            
+            <div class="hardware-grid" style="margin-bottom:16px;">
+                <div class="hw-card">
+                    <div class="hw-label">Servidor iPerf3 (:5201)</div>
+                    <div class="hw-val"><span id="badge-iperf" class="status-badge {'badge-ok' if iperf_ok else 'badge-err'}">{'ACTIVO' if iperf_ok else 'INACTIVO'}</span></div>
+                </div>
+                <div class="hw-card">
+                    <div class="hw-label">InfluxDB v2 (:{INFLUX_PORT})</div>
+                    <div class="hw-val"><span id="badge-influx" class="status-badge {'badge-ok' if influx_ok else 'badge-err'}">{'ACTIVO' if influx_ok else 'INACTIVO'}</span></div>
+                </div>
+                <div class="hw-card">
+                    <div class="hw-label">Grafana (:{GRAFANA_PORT})</div>
+                    <div class="hw-val"><span id="badge-grafana" class="status-badge {'badge-ok' if grafana_ok else 'badge-err'}">{'ACTIVO' if grafana_ok else 'INACTIVO'}</span></div>
+                </div>
+                <div class="hw-card">
+                    <div class="hw-label">Panel Servidor (:8000)</div>
+                    <div class="hw-val"><span class="status-badge badge-ok">ACTIVO</span></div>
+                </div>
+            </div>
+
+            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                <button onclick="restartDockerContainers()" class="btn btn-warning" id="btn-restart-docker">🔄 Reiniciar Contenedores Docker</button>
+                <button onclick="restartIperfServer()" class="btn btn-primary" id="btn-restart-iperf">🔄 Reactivar iPerf3 (:5201)</button>
+            </div>
+        </div>
+
+        <!-- HARDWARE & SISTEMA -->
+        <div class="card">
+            <div class="section-title">⚡ Telemetría de Hardware del Servidor / Raspberry Pi</div>
+            <div class="hardware-grid" style="margin-bottom:16px;">
+                <div class="hw-card">
+                    <div class="hw-label">Dispositivo / Modelo</div>
+                    <div class="hw-val" style="font-size:0.95rem;">{hw_info}</div>
+                </div>
+                <div class="hw-card">
+                    <div class="hw-label">Temperatura CPU</div>
+                    <div class="hw-val" id="hw-temp">{temp_val}</div>
+                </div>
+                <div class="hw-card">
+                    <div class="hw-label">Memoria RAM</div>
+                    <div class="hw-val" style="font-size:0.95rem;" id="hw-ram">{ram_val}</div>
+                </div>
+                <div class="hw-card">
+                    <div class="hw-label">Espacio en Disco</div>
+                    <div class="hw-val" style="font-size:0.95rem;" id="hw-disk">{disk_val}</div>
+                </div>
+                <div class="hw-card" style="grid-column: 1 / -1;">
+                    <div class="hw-label">Tiempo Activo (Uptime)</div>
+                    <div class="hw-val" style="font-size:1rem;" id="hw-uptime">{uptime_val}</div>
+                </div>
+            </div>
+
+            <button onclick="rebootSystem()" class="btn btn-danger">⚡ Reiniciar Raspberry Pi / Host</button>
+        </div>
+    </div>
+
+    <script>
+        function showAlert(msg, isSuccess = true) {{
+            const box = document.getElementById('alert-box');
+            box.className = 'alert ' + (isSuccess ? 'alert-success' : 'alert-error');
+            box.innerText = msg;
+            box.style.display = 'block';
+            setTimeout(() => {{ box.style.display = 'none'; }}, 4000);
+        }}
+
+        async function applySelectedIp() {{
+            const sel = document.getElementById('sel-ip').value;
+            try {{
+                const res = await fetch('/api/server/select-ip', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ ip: sel }})
+                }});
+                const data = await res.json();
+                if (data.status === 'ok') {{
+                    showAlert(data.message, true);
+                }} else {{
+                    showAlert('Error: ' + data.message, false);
+                }}
+            }} catch(e) {{
+                showAlert('Fallo de red: ' + e, false);
+            }}
+        }}
+
+        async function saveCredentials() {{
+            const payload = {{
+                influx_org: document.getElementById('cfg-org').value,
+                influx_bucket: document.getElementById('cfg-bucket').value,
+                influx_token: document.getElementById('cfg-token').value,
+                grafana_user: document.getElementById('cfg-guser').value,
+                grafana_password: document.getElementById('cfg-gpass').value,
+                selected_ip: document.getElementById('sel-ip').value
+            }};
+            try {{
+                const res = await fetch('/api/admin/config', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify(payload)
+                }});
+                const data = await res.json();
+                if (data.status === 'ok') {{
+                    showAlert(data.message, true);
+                }} else {{
+                    showAlert('Error: ' + data.message, false);
+                }}
+            }} catch(e) {{
+                showAlert('Error al guardar credenciales: ' + e, false);
+            }}
+        }}
+
+        async function restartDockerContainers() {{
+            const btn = document.getElementById('btn-restart-docker');
+            btn.disabled = true;
+            btn.innerText = 'Reiniciando...';
+            try {{
+                const res = await fetch('/api/docker/restart', {{ method: 'POST' }});
+                const data = await res.json();
+                showAlert(data.message, data.status === 'ok');
+            }} catch(e) {{
+                showAlert('Error: ' + e, false);
+            }} finally {{
+                btn.disabled = false;
+                btn.innerText = '🔄 Reiniciar Contenedores Docker';
+            }}
+        }}
+
+        async function restartIperfServer() {{
+            const btn = document.getElementById('btn-restart-iperf');
+            btn.disabled = true;
+            btn.innerText = 'Reactivando...';
+            try {{
+                const res = await fetch('/api/iperf/restart', {{ method: 'POST' }});
+                const data = await res.json();
+                showAlert(data.message, data.status === 'ok');
+            }} catch(e) {{
+                showAlert('Error: ' + e, false);
+            }} finally {{
+                btn.disabled = false;
+                btn.innerText = '🔄 Reactivar iPerf3 (:5201)';
+            }}
+        }}
+
+        async function rebootSystem() {{
+            if (!confirm('¿Estás seguro de que deseas reiniciar la Raspberry Pi / Servidor?')) return;
+            try {{
+                const res = await fetch('/api/system/reboot', {{ method: 'POST' }});
+                const data = await res.json();
+                showAlert(data.message, true);
+            }} catch(e) {{
+                showAlert('Error: ' + e, false);
+            }}
+        }}
+    </script>
+</body>
+</html>
+"""
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -593,7 +1113,10 @@ async def dashboard() -> str:
         <div class="card">
             <div class="header">
                 <h1>📡 RedLab Tester - Servidor Central</h1>
-                {iperf_badge}
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <a href="/admin" class="service-btn" style="background:#4F46E5; padding:7px 14px; text-decoration:none;">⚙️ Setup / Admin</a>
+                    {iperf_badge}
+                </div>
             </div>
             <p class="subtitle">Este equipo opera como servidor central de mediciones (iPerf3), almacenamiento de telemetría (InfluxDB v2 nativo) y paneles de control (Grafana nativo).</p>
 

@@ -1,0 +1,38 @@
+name: Build Raspberry Pi Appliance Image
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-rpi:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            wget \
+            xz-utils \
+            fdisk \
+            kpartx \
+            e2fsprogs \
+            curl \
+            qemu-user-static
+
+      - name: Execute Raspberry Pi Image Build
+        run: |
+          sudo bash rpi/build_rpi_image.sh
+
+      - name: Upload Appliance Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: redlab-server-rpi-arm64
+          path: Empaquetado/redlab-server-rpi-arm64.img.xz
+          retention-days: 14
+

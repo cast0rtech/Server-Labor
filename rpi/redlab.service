@@ -1,0 +1,32 @@
+[Unit]
+Description=RedLab Tester - Servidor Central & Stack de Telemetria
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/redlab
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=-/opt/redlab/.env
+
+# 1. Configurar red (DHCP + IP fija de respaldo 192.168.1.200)
+ExecStartPre=-/bin/bash /opt/redlab/rpi/redlab-network.sh
+
+# 2. Levantar contenedores Docker (InfluxDB v2, Grafana, iPerf3) con restart: always
+ExecStartPre=/usr/bin/docker compose -f /opt/redlab/docker-compose.yml up -d
+
+# 3. Iniciar el servidor central FastAPI
+ExecStart=/usr/bin/python3 /opt/redlab/servidor.py
+
+# Auto-reinicio continuo en caso de fallo o caída de proceso
+Restart=always
+RestartSec=5
+
+# Límites y timeouts
+TimeoutStartSec=180
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+

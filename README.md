@@ -80,15 +80,29 @@ python cliente.py --cli --server 192.168.1.10 --duration 30
 
 El cliente utiliza directamente el binario nativo Windows `iperf3.exe` (junto con `cygwin1.dll`), resolviendo la salida en formato JSON estructurado. Esto garantiza compatibilidad nativa total y alto rendimiento en Windows sin requerir bibliotecas compartidas de Linux.
 
+## Appliance Autónomo para Raspberry Pi
+
+El servidor central puede desplegarse en una **Raspberry Pi (3B+, 4B o 5)** como un equipo embebido dedicado:
+- **Red Doble:** IP por **DHCP automático** + Enlace Fijo de Respaldo en **`192.168.1.200/24`** (para conectarte directamente con cable de red sin router) y mDNS **`http://redlab.local:8000`**.
+- **Auto-reinicio:** Todos los contenedores Docker configurados con `restart: always` y servicio `systemd` que arranca automáticamente al encender el equipo.
+- **Panel Setup & Admin:** Accesible en **`http://redlab.local:8000/admin`** para configurar credenciales, seleccionar la IP de pruebas, monitorear la temperatura de la CPU, reiniciar contenedores o reiniciar la Raspberry Pi.
+
+Para instrucciones completas de instalación y compilación de la imagen, consulta [README_RPI.md](rpi/README_RPI.md).
+
 ## Archivos principales
 
 ```text
 docker-compose.yml             Infraestructura Docker
-servidor.py                    API FastAPI
-cliente.py                     Cliente de medición
+servidor.py                    API FastAPI y Panel Setup-Admin UI
+cliente.py                     Cliente de medición con GUI Tkinter
+rpi/                           Archivos y scripts de imagen para Raspberry Pi
+rpi/install_rpi.sh             Instalador desatendido para Raspberry Pi OS
+rpi/build_rpi_image.sh         Generador/Compilador de imagen .img.xz
+rpi/redlab-network.sh          Configuración DHCP + Fallback 192.168.1.200
+rpi/redlab.service             Servicio systemd con auto-reinicio
 .env.example                   Plantilla de configuración del cliente
 requirements.txt               Dependencias Python
 instalador.iss                 Definición del instalador Inno Setup
 build.ps1                      Automatización de compilación y empaquetado
-grafana/provisioning/           Configuración automática de InfluxDB en Grafana
+grafana/provisioning/          Configuración automática de InfluxDB en Grafana
 ```

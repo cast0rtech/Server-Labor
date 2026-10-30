@@ -14,7 +14,7 @@ services:
     volumes:
       - influxdb_data:/var/lib/influxdb2
       - influxdb_config:/etc/influxdb2
-    restart: unless-stopped
+    restart: always
 
   grafana:
     image: grafana/grafana:latest
@@ -35,7 +35,7 @@ services:
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-    restart: unless-stopped
+    restart: always
 
   iperf3:
     image: networkstatic/iperf3
@@ -44,7 +44,7 @@ services:
     ports:
       - "5201:5201/tcp"
       - "5201:5201/udp"
-    restart: unless-stopped
+    restart: always
     profiles:
       - standalone
 
