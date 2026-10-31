@@ -32,7 +32,7 @@ done
 
 if [ -n "$MISSING_TOOLS" ]; then
     echo "==> 1. Instalando herramientas necesarias: $MISSING_TOOLS..."
-    apt-get update -y || apt-get update --fix-missing || true
+    apt-get update || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         wget curl xz-utils kpartx qemu-utils qemu-user-static dosfstools e2fsprogs util-linux || true
 else

@@ -3,6 +3,8 @@ name: Build Raspberry Pi Appliance Image
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
 
@@ -15,7 +17,7 @@ jobs:
 
       - name: Install Build Dependencies
         run: |
-          sudo apt-get update -y || sudo apt-get update --fix-missing || true
+          sudo apt-get update || true
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             wget \
             curl \
