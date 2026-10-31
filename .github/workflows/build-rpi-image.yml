@@ -15,15 +15,17 @@ jobs:
 
       - name: Install Build Dependencies
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get update -y || sudo apt-get update --fix-missing || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             wget \
-            xz-utils \
-            fdisk \
-            kpartx \
-            e2fsprogs \
             curl \
-            qemu-user-static
+            xz-utils \
+            kpartx \
+            qemu-utils \
+            qemu-user-static \
+            dosfstools \
+            e2fsprogs \
+            util-linux || true
 
       - name: Execute Raspberry Pi Image Build
         run: |

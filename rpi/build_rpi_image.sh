@@ -21,39 +21,34 @@ echo "======================================================================"
 echo "    COMPILACIÓN DE IMAGEN APPLIANCE RASPBERRY PI - REDLAB"
 echo "======================================================================"
 
-# Dependencias necesarias en el host de compilación
-echo "==> 1. Comprobando herramientas de compilación..."
-apt-get update -y
-apt-get install -y --no-install-recommends \
-    wget \
-    xz-utils \
-    fdisk \
-    kpartx \
-    e2fsprogs \
-    curl \
-    qemu-user-static
+# 1. Comprobar e instalar herramientas si faltan
+REQUIRED_TOOLS="wget xz losetup curl sfdisk e2fsck resize2fs"
+MISSING_TOOLS=""
+for tool in $REQUIRED_TOOLS; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        MISSING_TOOLS="$MISSING_TOOLS $tool"
+    fi
+done
 
-# Descargar imagen oficial Raspberry Pi OS Lite (64-bit Bookworm)
-RPI_BASE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images"
-LATEST_SUBDIR=$(curl -s "$RPI_BASE_URL/" | grep -o 'raspios_lite_arm64-[0-9-]*' | tail -n 1)
-if [ -z "$LATEST_SUBDIR" ]; then
-    LATEST_SUBDIR="raspios_lite_arm64-2024-07-04"
+if [ -n "$MISSING_TOOLS" ]; then
+    echo "==> 1. Instalando herramientas necesarias: $MISSING_TOOLS..."
+    apt-get update -y || apt-get update --fix-missing || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        wget curl xz-utils kpartx qemu-utils qemu-user-static dosfstools e2fsprogs util-linux || true
+else
+    echo "==> 1. Todas las herramientas de compilación ya están disponibles."
 fi
 
-IMAGE_XZ_NAME=$(curl -s "$RPI_BASE_URL/$LATEST_SUBDIR/" | grep -o '[0-9-]*raspios-bookworm-arm64-lite.img.xz' | head -n 1)
-if [ -z "$IMAGE_XZ_NAME" ]; then
-    IMAGE_XZ_NAME="2024-07-04-raspios-bookworm-arm64-lite.img.xz"
-fi
-
-IMAGE_URL="$RPI_BASE_URL/$LATEST_SUBDIR/$IMAGE_XZ_NAME"
+# 2. Descargar imagen oficial Raspberry Pi OS Lite (64-bit Bookworm)
 TARGET_XZ="$BUILD_DIR/raspios_base.img.xz"
 RAW_IMG="$BUILD_DIR/redlab-server-rpi-arm64.img"
 
 if [ ! -f "$TARGET_XZ" ]; then
-    echo "==> 2. Descargando imagen oficial de Raspberry Pi OS Lite Bookworm ($IMAGE_XZ_NAME)..."
-    wget -c "$IMAGE_URL" -O "$TARGET_XZ"
+    echo "==> 2. Descargando última imagen oficial de Raspberry Pi OS Lite Bookworm (ARM64)..."
+    wget -q --show-progress -O "$TARGET_XZ" "https://downloads.raspberrypi.com/raspios_lite_arm64_latest" || \
+    curl -L -o "$TARGET_XZ" "https://downloads.raspberrypi.com/raspios_lite_arm64_latest"
 else
-    echo "==> 2. Imagen base ya descargada en $TARGET_XZ."
+    echo "==> 2. Imagen base ya existente en $TARGET_XZ."
 fi
 
 echo "==> 3. Descomprimiendo imagen base..."
@@ -63,27 +58,47 @@ xz -d -c "$TARGET_XZ" > "$RAW_IMG"
 echo "==> 4. Expandiendo tamaño de la imagen para alojar Docker e imágenes (+3.5 GB)..."
 qemu-img resize -f raw "$RAW_IMG" +3500M 2>/dev/null || truncate -s +3500M "$RAW_IMG"
 
-# Reubicar tabla de particiones y expandir segunda partición
+# Reubicar tabla de particiones y expandir segunda partición (rootfs)
 echo ", +" | sfdisk -N 2 "$RAW_IMG" --force || true
 
-# Configurar dispositivos loop
+# 5. Configurar dispositivos loop
 echo "==> 5. Mapeando particiones de la imagen..."
 LOOP_DEV=$(losetup -f -P --show "$RAW_IMG")
-trap 'losetup -d "$LOOP_DEV" 2>/dev/null || true' EXIT
-
-BOOT_DEV="${LOOP_DEV}p1"
-ROOT_DEV="${LOOP_DEV}p2"
-
-e2fsck -f -y "$ROOT_DEV" || true
-resize2fs "$ROOT_DEV"
 
 BOOT_MNT="$BUILD_DIR/mnt_boot"
 ROOT_MNT="$BUILD_DIR/mnt_root"
 mkdir -p "$BOOT_MNT" "$ROOT_MNT"
 
+cleanup() {
+    echo "==> Limpiando montajes y dispositivos loop..."
+    umount -l "$BOOT_MNT" 2>/dev/null || true
+    umount -l "$ROOT_MNT" 2>/dev/null || true
+    if [ -n "${LOOP_DEV:-}" ]; then
+        kpartx -dv "$LOOP_DEV" 2>/dev/null || true
+        losetup -d "$LOOP_DEV" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+sleep 1
+partprobe "$LOOP_DEV" 2>/dev/null || true
+
+BOOT_DEV="${LOOP_DEV}p1"
+ROOT_DEV="${LOOP_DEV}p2"
+
+if [ ! -b "$BOOT_DEV" ]; then
+    echo "==> Mapeando particiones con kpartx..."
+    kpartx -av "$LOOP_DEV"
+    LOOP_BASE=$(basename "$LOOP_DEV")
+    BOOT_DEV="/dev/mapper/${LOOP_BASE}p1"
+    ROOT_DEV="/dev/mapper/${LOOP_BASE}p2"
+fi
+
+e2fsck -f -y "$ROOT_DEV" || true
+resize2fs "$ROOT_DEV" || true
+
 mount "$BOOT_DEV" "$BOOT_MNT"
 mount "$ROOT_DEV" "$ROOT_MNT"
-trap 'umount -l "$BOOT_MNT" "$ROOT_MNT" 2>/dev/null || true; losetup -d "$LOOP_DEV" 2>/dev/null || true' EXIT
 
 echo "==> 6. Inyectando configuración de RedLab en la imagen..."
 
